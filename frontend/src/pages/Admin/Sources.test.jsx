@@ -1,0 +1,304 @@
+/* @vitest-environment jsdom */
+
+import React from 'react'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { render, screen, fireEvent, cleanup } from '@testing-library/react'
+import SourcesPage, {
+  CANONICAL_SOURCES,
+  validateBudgetField,
+  validateBudgetForm,
+} from './Sources'
+
+describe('FE-31: Admin Source Registry & Budget Configuration', () => {
+  afterEach(() => {
+    cleanup()
+  })
+
+  describe('Validation Functions Unit Tests', () => {
+    it('rejects empty or whitespace inputs', () => {
+      expect(validateBudgetField('')).toBe('Value is required.')
+      expect(validateBudgetField('   ')).toBe('Value is required.')
+      expect(validateBudgetField(null)).toBe('Value is required.')
+      expect(validateBudgetField(undefined)).toBe('Value is required.')
+    })
+
+    it('rejects negative numbers', () => {
+      expect(validateBudgetField('-1')).toBe('Value cannot be negative.')
+      expect(validateBudgetField('-500')).toBe('Value cannot be negative.')
+    })
+
+    it('rejects non-numeric characters', () => {
+      expect(validateBudgetField('abc')).toBe('Value must be a valid non-negative integer.')
+      expect(validateBudgetField('100a')).toBe('Value must be a valid non-negative integer.')
+      expect(validateBudgetField('$50')).toBe('Value must be a valid non-negative integer.')
+    })
+
+    it('rejects decimal numbers (floats)', () => {
+      expect(validateBudgetField('12.5')).toBe('Value must be a whole number (integer).')
+      expect(validateBudgetField('0.5')).toBe('Value must be a whole number (integer).')
+    })
+
+    it('accepts valid non-negative integers', () => {
+      expect(validateBudgetField('0')).toBeNull()
+      expect(validateBudgetField('1')).toBeNull()
+      expect(validateBudgetField('500')).toBeNull()
+      expect(validateBudgetField('1000')).toBeNull()
+    })
+
+    it('validates entire form object properly', () => {
+      const validForm = {
+        contactoutMonthly: '600',
+        snovMonthly: '400',
+        dailySendLimit: '150',
+      }
+      expect(validateBudgetForm(validForm)).toEqual({})
+
+      const invalidForm = {
+        contactoutMonthly: '-10',
+        snovMonthly: 'abc',
+        dailySendLimit: '10.5',
+      }
+      const errors = validateBudgetForm(invalidForm)
+      expect(errors.contactoutMonthly).toBe('Value cannot be negative.')
+      expect(errors.snovMonthly).toBe('Value must be a valid non-negative integer.')
+      expect(errors.dailySendLimit).toBe('Value must be a whole number (integer).')
+    })
+  })
+
+  describe('Page Rendering Baseline', () => {
+    beforeEach(() => {
+      render(<SourcesPage />)
+    })
+
+    it('renders the header and FE-31 badge', () => {
+      expect(screen.getByText('Admin Source Registry & Budget Configuration')).toBeTruthy()
+      expect(screen.getByText('FE-31')).toBeTruthy()
+    })
+
+    it('renders the explicit in-memory demo notice banner and seed status disclaimer', () => {
+      expect(screen.getByRole('region', { name: /demo mode notice/i })).toBeTruthy()
+      expect(screen.getByText(/All changes update/i)).toBeTruthy()
+      expect(screen.getByText(/not saved to the backend/i)).toBeTruthy()
+      expect(screen.getByText(/Source health statuses reflect initial demo seed values/i)).toBeTruthy()
+    })
+
+    it('renders all 8 canonical scraper sources from seed data', () => {
+      expect(CANONICAL_SOURCES).toHaveLength(8)
+      CANONICAL_SOURCES.forEach((source) => {
+        expect(screen.getByText(source.name)).toBeTruthy()
+        expect(screen.getByText(source.id)).toBeTruthy()
+      })
+      expect(screen.getByText('7 Active')).toBeTruthy()
+      expect(screen.getByText('1 Disabled')).toBeTruthy()
+    })
+
+    it('renders default provisional budget inputs', () => {
+      const contactoutInput = screen.getByLabelText(/contactout monthly budget/i)
+      const snovInput = screen.getByLabelText(/snov\.io monthly budget/i)
+      const dailySendInput = screen.getByLabelText(/daily outreach send limit/i)
+
+      expect(contactoutInput.value).toBe('500')
+      expect(snovInput.value).toBe('500')
+      expect(dailySendInput.value).toBe('100')
+    })
+
+    it('does not render an arbitrary Reset All to Defaults button', () => {
+      expect(screen.queryByRole('button', { name: /reset all to defaults/i })).toBeNull()
+    })
+
+    it('has the save budget button disabled initially when no changes are made', () => {
+      const saveButton = screen.getByRole('button', { name: /review & save budget changes/i })
+      expect(saveButton.disabled).toBe(true)
+    })
+  })
+
+  describe('Budget Form Inline Validation in Component', () => {
+    beforeEach(() => {
+      render(<SourcesPage />)
+    })
+
+    it('shows inline error and disables submit when negative value entered', () => {
+      const contactoutInput = screen.getByLabelText(/contactout monthly budget/i)
+      fireEvent.change(contactoutInput, { target: { value: '-25' } })
+
+      expect(screen.getByText('Value cannot be negative.')).toBeTruthy()
+      const saveButton = screen.getByRole('button', { name: /review & save budget changes/i })
+      expect(saveButton.disabled).toBe(true)
+    })
+
+    it('shows inline error and disables submit when non-numeric value entered', () => {
+      const snovInput = screen.getByLabelText(/snov\.io monthly budget/i)
+      fireEvent.change(snovInput, { target: { value: 'invalid_text' } })
+
+      expect(screen.getByText('Value must be a valid non-negative integer.')).toBeTruthy()
+      const saveButton = screen.getByRole('button', { name: /review & save budget changes/i })
+      expect(saveButton.disabled).toBe(true)
+    })
+
+    it('shows inline error and disables submit when decimal value entered', () => {
+      const dailySendInput = screen.getByLabelText(/daily outreach send limit/i)
+      fireEvent.change(dailySendInput, { target: { value: '99.5' } })
+
+      expect(screen.getByText('Value must be a whole number (integer).')).toBeTruthy()
+      const saveButton = screen.getByRole('button', { name: /review & save budget changes/i })
+      expect(saveButton.disabled).toBe(true)
+    })
+
+    it('clears error and enables submit when valid number entered', () => {
+      const contactoutInput = screen.getByLabelText(/contactout monthly budget/i)
+      fireEvent.change(contactoutInput, { target: { value: '-10' } })
+      expect(screen.getByText('Value cannot be negative.')).toBeTruthy()
+
+      fireEvent.change(contactoutInput, { target: { value: '750' } })
+      expect(screen.queryByText('Value cannot be negative.')).toBeNull()
+
+      const saveButton = screen.getByRole('button', { name: /review & save budget changes/i })
+      expect(saveButton.disabled).toBe(false)
+    })
+  })
+
+  describe('Source Toggle Confirmation Workflow', () => {
+    beforeEach(() => {
+      render(<SourcesPage />)
+    })
+
+    it('opens confirmation modal with old and new values when toggle is clicked', () => {
+      const internshalaSwitch = screen.getByLabelText('Toggle scraper for Internshala')
+      expect(internshalaSwitch.getAttribute('aria-checked')).toBe('true')
+
+      fireEvent.click(internshalaSwitch)
+
+      expect(screen.getByRole('dialog')).toBeTruthy()
+      expect(screen.getByText('Confirm Scraper Source State Change')).toBeTruthy()
+      expect(screen.getByText('Old Value')).toBeTruthy()
+      expect(screen.getByText('New Value')).toBeTruthy()
+      expect(screen.getAllByText('Enabled').length).toBeGreaterThan(0)
+      expect(screen.getAllByText('Disabled').length).toBeGreaterThan(0)
+    })
+
+    it('preserves existing source state when confirmation is cancelled', () => {
+      const internshalaSwitch = screen.getByLabelText('Toggle scraper for Internshala')
+      fireEvent.click(internshalaSwitch)
+
+      const cancelButton = screen.getByRole('button', { name: /cancel/i })
+      fireEvent.click(cancelButton)
+
+      expect(screen.queryByRole('dialog')).toBeNull()
+      expect(internshalaSwitch.getAttribute('aria-checked')).toBe('true')
+      expect(screen.getByText('7 Active')).toBeTruthy()
+    })
+
+    it('applies exact proposed boolean state upon confirmation', () => {
+      const internshalaSwitch = screen.getByLabelText('Toggle scraper for Internshala')
+      fireEvent.click(internshalaSwitch)
+
+      const confirmButton = screen.getByRole('button', { name: /confirm disabled/i })
+      fireEvent.click(confirmButton)
+
+      expect(screen.queryByRole('dialog')).toBeNull()
+      expect(internshalaSwitch.getAttribute('aria-checked')).toBe('false')
+      expect(screen.getByText('6 Active')).toBeTruthy()
+      expect(screen.getByText('2 Disabled')).toBeTruthy()
+      expect(screen.getByText(/Scraper source "Internshala" has been disabled/i)).toBeTruthy()
+    })
+  })
+
+  describe('Consolidated Budget Changes Confirmation Workflow', () => {
+    beforeEach(() => {
+      render(<SourcesPage />)
+    })
+
+    it('opens consolidated modal showing diff table of modified fields', () => {
+      const contactoutInput = screen.getByLabelText(/contactout monthly budget/i)
+      const dailySendInput = screen.getByLabelText(/daily outreach send limit/i)
+
+      fireEvent.change(contactoutInput, { target: { value: '800' } })
+      fireEvent.change(dailySendInput, { target: { value: '150' } })
+
+      const saveButton = screen.getByRole('button', { name: /review & save budget changes/i })
+      fireEvent.click(saveButton)
+
+      expect(screen.getByRole('dialog')).toBeTruthy()
+      expect(screen.getByText('Confirm Budget Configuration Changes')).toBeTruthy()
+
+      expect(screen.getByText('ContactOut Monthly Credit Budget')).toBeTruthy()
+      expect(screen.getByText('500 credits')).toBeTruthy()
+      expect(screen.getByText('800 credits')).toBeTruthy()
+
+      expect(screen.getByText('Daily Outreach Send Limit')).toBeTruthy()
+      expect(screen.getByText('100 emails/day')).toBeTruthy()
+      expect(screen.getByText('150 emails/day')).toBeTruthy()
+
+      expect(screen.queryByText('Snov.io Monthly Credit Budget')).toBeNull()
+    })
+
+    it('cancels budget change without applying to committed state', () => {
+      const contactoutInput = screen.getByLabelText(/contactout monthly budget/i)
+      fireEvent.change(contactoutInput, { target: { value: '900' } })
+
+      const saveButton = screen.getByRole('button', { name: /review & save budget changes/i })
+      fireEvent.click(saveButton)
+
+      const cancelButton = screen.getByRole('button', { name: /cancel/i })
+      fireEvent.click(cancelButton)
+
+      expect(screen.queryByRole('dialog')).toBeNull()
+      const desc = document.getElementById('budget-contactout-desc')
+      expect(desc.textContent).toContain('500')
+      expect(desc.textContent).not.toContain('900')
+    })
+
+    it('commits exact snapshot values upon confirmation', () => {
+      const contactoutInput = screen.getByLabelText(/contactout monthly budget/i)
+      fireEvent.change(contactoutInput, { target: { value: '950' } })
+
+      const saveButton = screen.getByRole('button', { name: /review & save budget changes/i })
+      fireEvent.click(saveButton)
+
+      const confirmButton = screen.getByRole('button', { name: /confirm & apply changes/i })
+      fireEvent.click(confirmButton)
+
+      expect(screen.queryByRole('dialog')).toBeNull()
+      expect(screen.getByText(/Budget and send limit configuration updated/i)).toBeTruthy()
+      const desc = document.getElementById('budget-contactout-desc')
+      expect(desc.textContent).toContain('950')
+    })
+
+    it('commits the exact snapshot shown in dialog even if form input changes afterward', () => {
+      const contactoutInput = screen.getByLabelText(/contactout monthly budget/i)
+
+      // 1. Change ContactOut budget from 500 to 950
+      fireEvent.change(contactoutInput, { target: { value: '950' } })
+
+      // 2. Click Review & Save and open the confirmation dialog
+      const saveButton = screen.getByRole('button', { name: /review & save budget changes/i })
+      fireEvent.click(saveButton)
+      expect(screen.getByRole('dialog')).toBeTruthy()
+      expect(screen.getByText('950 credits')).toBeTruthy()
+
+      // 3. Change form's underlying value to 975 after dialog has opened
+      fireEvent.change(contactoutInput, { target: { value: '975' } })
+
+      // 4. Click Confirm & Apply Changes
+      const confirmButton = screen.getByRole('button', { name: /confirm & apply changes/i })
+      fireEvent.click(confirmButton)
+
+      // 5. Verify that committed budget is still 950, not 975
+      expect(screen.queryByRole('dialog')).toBeNull()
+      const desc = document.getElementById('budget-contactout-desc')
+      expect(desc.textContent).toContain('950')
+      expect(desc.textContent).not.toContain('975')
+    })
+
+    it('resets form back to committed values on Reset Form click', () => {
+      const contactoutInput = screen.getByLabelText(/contactout monthly budget/i)
+      fireEvent.change(contactoutInput, { target: { value: '999' } })
+      expect(contactoutInput.value).toBe('999')
+
+      const resetFormButton = screen.getByRole('button', { name: /reset form/i })
+      fireEvent.click(resetFormButton)
+
+      expect(contactoutInput.value).toBe('500')
+    })
+  })
+})
