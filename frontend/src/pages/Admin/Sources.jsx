@@ -103,11 +103,11 @@ export function validateBudgetField(value) {
   }
 
   if (str.includes('.')) {
-    return 'Value must be a whole number (integer).'
+    return 'Please enter a valid whole number, e.g. 100.'
   }
 
   if (!/^\d+$/.test(str)) {
-    return 'Value must be a valid non-negative integer.'
+    return 'Please enter a valid whole number, e.g. 100.'
   }
 
   return null
@@ -126,6 +126,7 @@ export function validateBudgetForm(formValues) {
 
 export default function SourcesPage() {
   const [sources, setSources] = useState(CANONICAL_SOURCES)
+  const [statusFilter, setStatusFilter] = useState('all')
   const [committedBudgets, setCommittedBudgets] = useState(PROVISIONAL_BUDGET_DEFAULTS)
   const [budgetForm, setBudgetForm] = useState(PROVISIONAL_BUDGET_DEFAULTS)
   const [formErrors, setFormErrors] = useState({})
@@ -136,6 +137,16 @@ export default function SourcesPage() {
     () => sources.filter((s) => s.isEnabled).length,
     [sources]
   )
+
+  const filteredSources = useMemo(() => {
+    if (statusFilter === 'enabled') {
+      return sources.filter((s) => s.isEnabled)
+    }
+    if (statusFilter === 'disabled') {
+      return sources.filter((s) => !s.isEnabled)
+    }
+    return sources
+  }, [sources, statusFilter])
 
   const changedBudgetFields = useMemo(() => {
     return Object.keys(committedBudgets).filter(
@@ -246,11 +257,10 @@ export default function SourcesPage() {
   return (
     <div style={{ padding: '32px', maxWidth: '1200px', margin: '0 auto' }}>
       <div style={{ marginBottom: '24px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+        <div style={{ marginBottom: '8px' }}>
           <h1 style={{ fontSize: '24px', fontWeight: 700, color: 'var(--color-text-main)', margin: 0 }}>
             Admin Source Registry &amp; Budget Configuration
           </h1>
-          <Badge variant="info">FE-31</Badge>
         </div>
         <p style={{ color: 'var(--color-text-muted)', fontSize: '14px', margin: 0 }}>
           Manage scraper source availability, monthly enrichment provider budgets, and daily outreach send limits.
@@ -351,6 +361,62 @@ export default function SourcesPage() {
           </div>
         </div>
 
+        <div
+          role="group"
+          aria-label="Filter scraper sources by status"
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            marginBottom: '16px',
+            flexWrap: 'wrap',
+          }}
+        >
+          <span style={{ fontSize: '13px', fontWeight: 500, color: 'var(--color-text-muted)' }}>
+            Filter:
+          </span>
+          <div
+            style={{
+              display: 'inline-flex',
+              padding: '2px',
+              backgroundColor: 'var(--color-bg-subtle)',
+              borderRadius: 'var(--radius-md)',
+              border: '1px solid var(--color-border)',
+              gap: '2px',
+            }}
+          >
+            {[
+              { id: 'all', label: 'All' },
+              { id: 'enabled', label: 'Enabled' },
+              { id: 'disabled', label: 'Disabled' },
+            ].map(({ id, label }) => {
+              const isSelected = statusFilter === id
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => setStatusFilter(id)}
+                  aria-pressed={isSelected}
+                  style={{
+                    padding: '5px 12px',
+                    fontSize: '12px',
+                    fontWeight: isSelected ? 600 : 500,
+                    borderRadius: 'var(--radius-sm)',
+                    border: 'none',
+                    cursor: 'pointer',
+                    backgroundColor: isSelected ? 'var(--color-primary)' : 'transparent',
+                    color: isSelected ? '#ffffff' : 'var(--color-text-main)',
+                    boxShadow: isSelected ? 'var(--shadow-sm)' : 'none',
+                    transition: 'all 0.15s ease',
+                  }}
+                >
+                  {label}
+                </button>
+              )
+            })}
+          </div>
+        </div>
+
         <div style={{ overflowX: 'auto' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '14px' }}>
             <thead>
@@ -363,7 +429,7 @@ export default function SourcesPage() {
               </tr>
             </thead>
             <tbody>
-              {sources.map((source) => (
+              {filteredSources.map((source) => (
                 <tr
                   key={source.id}
                   style={{

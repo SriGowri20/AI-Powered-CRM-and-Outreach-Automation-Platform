@@ -28,14 +28,14 @@ describe('FE-31: Admin Source Registry & Budget Configuration', () => {
     })
 
     it('rejects non-numeric characters', () => {
-      expect(validateBudgetField('abc')).toBe('Value must be a valid non-negative integer.')
-      expect(validateBudgetField('100a')).toBe('Value must be a valid non-negative integer.')
-      expect(validateBudgetField('$50')).toBe('Value must be a valid non-negative integer.')
+      expect(validateBudgetField('abc')).toBe('Please enter a valid whole number, e.g. 100.')
+      expect(validateBudgetField('100a')).toBe('Please enter a valid whole number, e.g. 100.')
+      expect(validateBudgetField('$50')).toBe('Please enter a valid whole number, e.g. 100.')
     })
 
     it('rejects decimal numbers (floats)', () => {
-      expect(validateBudgetField('12.5')).toBe('Value must be a whole number (integer).')
-      expect(validateBudgetField('0.5')).toBe('Value must be a whole number (integer).')
+      expect(validateBudgetField('12.5')).toBe('Please enter a valid whole number, e.g. 100.')
+      expect(validateBudgetField('0.5')).toBe('Please enter a valid whole number, e.g. 100.')
     })
 
     it('accepts valid non-negative integers', () => {
@@ -60,8 +60,8 @@ describe('FE-31: Admin Source Registry & Budget Configuration', () => {
       }
       const errors = validateBudgetForm(invalidForm)
       expect(errors.contactoutMonthly).toBe('Value cannot be negative.')
-      expect(errors.snovMonthly).toBe('Value must be a valid non-negative integer.')
-      expect(errors.dailySendLimit).toBe('Value must be a whole number (integer).')
+      expect(errors.snovMonthly).toBe('Please enter a valid whole number, e.g. 100.')
+      expect(errors.dailySendLimit).toBe('Please enter a valid whole number, e.g. 100.')
     })
   })
 
@@ -70,9 +70,9 @@ describe('FE-31: Admin Source Registry & Budget Configuration', () => {
       render(<SourcesPage />)
     })
 
-    it('renders the header and FE-31 badge', () => {
+    it('renders the header without the FE-31 badge', () => {
       expect(screen.getByText('Admin Source Registry & Budget Configuration')).toBeTruthy()
-      expect(screen.getByText('FE-31')).toBeTruthy()
+      expect(screen.queryByText('FE-31')).toBeNull()
     })
 
     it('renders the explicit in-memory demo notice banner and seed status disclaimer', () => {
@@ -130,7 +130,7 @@ describe('FE-31: Admin Source Registry & Budget Configuration', () => {
       const snovInput = screen.getByLabelText(/snov\.io monthly budget/i)
       fireEvent.change(snovInput, { target: { value: 'invalid_text' } })
 
-      expect(screen.getByText('Value must be a valid non-negative integer.')).toBeTruthy()
+      expect(screen.getByText('Please enter a valid whole number, e.g. 100.')).toBeTruthy()
       const saveButton = screen.getByRole('button', { name: /review & save budget changes/i })
       expect(saveButton.disabled).toBe(true)
     })
@@ -139,7 +139,7 @@ describe('FE-31: Admin Source Registry & Budget Configuration', () => {
       const dailySendInput = screen.getByLabelText(/daily outreach send limit/i)
       fireEvent.change(dailySendInput, { target: { value: '99.5' } })
 
-      expect(screen.getByText('Value must be a whole number (integer).')).toBeTruthy()
+      expect(screen.getByText('Please enter a valid whole number, e.g. 100.')).toBeTruthy()
       const saveButton = screen.getByRole('button', { name: /review & save budget changes/i })
       expect(saveButton.disabled).toBe(true)
     })
@@ -299,6 +299,66 @@ describe('FE-31: Admin Source Registry & Budget Configuration', () => {
       fireEvent.click(resetFormButton)
 
       expect(contactoutInput.value).toBe('500')
+    })
+  })
+
+  describe('Source Status Filters', () => {
+    beforeEach(() => {
+      render(<SourcesPage />)
+    })
+
+    it('defaults to "All" filter showing all 8 sources', () => {
+      const allFilterBtn = screen.getByRole('button', { name: 'All' })
+      expect(allFilterBtn.getAttribute('aria-pressed')).toBe('true')
+      CANONICAL_SOURCES.forEach((source) => {
+        expect(screen.getByText(source.name)).toBeTruthy()
+      })
+    })
+
+    it('filters to show only enabled sources when "Enabled" is clicked', () => {
+      const enabledFilterBtn = screen.getByRole('button', { name: 'Enabled' })
+      fireEvent.click(enabledFilterBtn)
+      expect(enabledFilterBtn.getAttribute('aria-pressed')).toBe('true')
+
+      // Enabled sources should be visible
+      expect(screen.getByText('Internshala')).toBeTruthy()
+      expect(screen.getByText('Naukri Freshers')).toBeTruthy()
+      // Disabled source should not be visible in the table
+      expect(screen.queryByText('Shine Freshers')).toBeNull()
+
+      // Summary badges still show total counts (7 Active, 1 Disabled)
+      expect(screen.getByText('7 Active')).toBeTruthy()
+      expect(screen.getByText('1 Disabled')).toBeTruthy()
+    })
+
+    it('filters to show only disabled sources when "Disabled" is clicked', () => {
+      const disabledFilterBtn = screen.getByRole('button', { name: 'Disabled' })
+      fireEvent.click(disabledFilterBtn)
+      expect(disabledFilterBtn.getAttribute('aria-pressed')).toBe('true')
+
+      // Disabled source should be visible
+      expect(screen.getByText('Shine Freshers')).toBeTruthy()
+      // Enabled sources should not be visible in the table
+      expect(screen.queryByText('Internshala')).toBeNull()
+      expect(screen.queryByText('Naukri Freshers')).toBeNull()
+
+      // Summary badges still show total counts
+      expect(screen.getByText('7 Active')).toBeTruthy()
+      expect(screen.getByText('1 Disabled')).toBeTruthy()
+    })
+
+    it('restores all sources when "All" is clicked after filtering', () => {
+      const disabledFilterBtn = screen.getByRole('button', { name: 'Disabled' })
+      fireEvent.click(disabledFilterBtn)
+      expect(screen.queryByText('Internshala')).toBeNull()
+
+      const allFilterBtn = screen.getByRole('button', { name: 'All' })
+      fireEvent.click(allFilterBtn)
+      expect(allFilterBtn.getAttribute('aria-pressed')).toBe('true')
+
+      CANONICAL_SOURCES.forEach((source) => {
+        expect(screen.getByText(source.name)).toBeTruthy()
+      })
     })
   })
 })
