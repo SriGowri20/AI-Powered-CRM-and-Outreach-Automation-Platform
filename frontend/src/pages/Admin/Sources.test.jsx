@@ -5,6 +5,14 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
 import SourcesPage, {
   CANONICAL_SOURCES,
+  PROVISIONAL_PROVIDER_MONTHLY_BUDGETS,
+  PROVISIONAL_DAILY_SEND_LIMIT,
+  PROVISIONAL_BUDGET_DEFAULTS,
+  fetchSources,
+  updateSourceToggle,
+  fetchBudgetSettings,
+  updateBudgetSettings,
+  resetMockApiStores,
   validateBudgetField,
   validateBudgetForm,
 } from './Sources'
@@ -12,6 +20,7 @@ import SourcesPage, {
 describe('FE-31: Admin Source Registry & Budget Configuration', () => {
   afterEach(() => {
     cleanup()
+    resetMockApiStores()
   })
 
   describe('Validation Functions Unit Tests', () => {
@@ -38,7 +47,7 @@ describe('FE-31: Admin Source Registry & Budget Configuration', () => {
       expect(validateBudgetField('0.5')).toBe('Please enter a valid whole number, e.g. 100.')
     })
 
-    it('accepts valid non-negative integers', () => {
+    it('accepts valid non-negative integers including zero', () => {
       expect(validateBudgetField('0')).toBeNull()
       expect(validateBudgetField('1')).toBeNull()
       expect(validateBudgetField('500')).toBeNull()
@@ -92,7 +101,14 @@ describe('FE-31: Admin Source Registry & Budget Configuration', () => {
       expect(screen.getByText('1 Disabled')).toBeTruthy()
     })
 
-    it('renders default provisional budget inputs', () => {
+    it('renders default provisional budget inputs with clearly named constants', () => {
+      expect(PROVISIONAL_PROVIDER_MONTHLY_BUDGETS.contactout).toBe('500')
+      expect(PROVISIONAL_PROVIDER_MONTHLY_BUDGETS.snov).toBe('500')
+      expect(PROVISIONAL_DAILY_SEND_LIMIT).toBe('100')
+      expect(PROVISIONAL_BUDGET_DEFAULTS.contactoutMonthly).toBe('500')
+      expect(PROVISIONAL_BUDGET_DEFAULTS.snovMonthly).toBe('500')
+      expect(PROVISIONAL_BUDGET_DEFAULTS.dailySendLimit).toBe('100')
+
       const contactoutInput = screen.getByLabelText(/contactout monthly budget/i)
       const snovInput = screen.getByLabelText(/snov\.io monthly budget/i)
       const dailySendInput = screen.getByLabelText(/daily outreach send limit/i)
@@ -200,6 +216,33 @@ describe('FE-31: Admin Source Registry & Budget Configuration', () => {
       expect(screen.getByText('6 Active')).toBeTruthy()
       expect(screen.getByText('2 Disabled')).toBeTruthy()
       expect(screen.getByText(/Scraper source "Internshala" has been disabled/i)).toBeTruthy()
+    })
+
+    it('displays warning note when enabling a source whose status is disabled or quarantined', () => {
+      cleanup()
+      const unhealthySources = [
+        {
+          id: 'quarantined_src',
+          name: 'Quarantined Portal',
+          baseUrl: 'https://quarantine.example.com',
+          isEnabled: false,
+          permittedUseNote: 'Under investigation',
+          status: 'quarantined',
+        },
+      ]
+      render(<SourcesPage initialSources={unhealthySources} />)
+
+      const toggleSwitch = screen.getByLabelText('Toggle scraper for Quarantined Portal')
+      fireEvent.click(toggleSwitch)
+
+      expect(screen.getByRole('dialog')).toBeTruthy()
+      expect(screen.getByRole('alert')).toBeTruthy()
+      expect(screen.getByText(/will not run until healthy/i)).toBeTruthy()
+      expect(screen.getByText(/status is currently/i)).toBeTruthy()
+
+      const confirmBtn = screen.getByRole('button', { name: /confirm enabled/i })
+      fireEvent.click(confirmBtn)
+      expect(screen.getByText(/will not run until healthy/i)).toBeTruthy()
     })
   })
 
@@ -359,6 +402,56 @@ describe('FE-31: Admin Source Registry & Budget Configuration', () => {
       CANONICAL_SOURCES.forEach((source) => {
         expect(screen.getByText(source.name)).toBeTruthy()
       })
+    })
+  })
+
+  describe('In-File Mock API Layer Unit Tests', () => {
+    beforeEach(() => {
+      resetMockApiStores()
+    })
+
+    it('fetches canonical sources and budget settings', async () => {
+      const sources = await fetchSources()
+      expect(sources).toHaveLength(8)
+      const budgets = await fetchBudgetSettings()
+      expect(budgets.contactoutMonthly).toBe('500')
+      expect(budgets.snovMonthly).toBe('500')
+      expect(budgets.dailySendLimit).toBe('100')
+    })
+
+    it('updates source toggle in memory store', async () => {
+      const res = await updateSourceToggle('internshala', false)
+      expect(res.success).toBe(true)
+      expect(res.source.isEnabled).toBe(false)
+
+      const updatedSources = await fetchSources()
+      const internshala = updatedSources.find((s) => s.id === 'internshala')
+      expect(internshala.isEnabled).toBe(false)
+    })
+
+    it('updates budget settings in memory store', async () => {
+      const newSettings = {
+        contactoutMonthly: '750',
+        snovMonthly: '250',
+        dailySendLimit: '120',
+      }
+      const res = await updateBudgetSettings(newSettings)
+      expect(res.success).toBe(true)
+      expect(res.budgets).toEqual(newSettings)
+
+      const fetched = await fetchBudgetSettings()
+      expect(fetched).toEqual(newSettings)
+    })
+
+    it('resets stores back to defaults with resetMockApiStores', async () => {
+      await updateSourceToggle('internshala', false)
+      await updateBudgetSettings({ contactoutMonthly: '999', snovMonthly: '999', dailySendLimit: '999' })
+      resetMockApiStores()
+
+      const sources = await fetchSources()
+      const budgets = await fetchBudgetSettings()
+      expect(sources.find((s) => s.id === 'internshala').isEnabled).toBe(true)
+      expect(budgets.contactoutMonthly).toBe('500')
     })
   })
 })

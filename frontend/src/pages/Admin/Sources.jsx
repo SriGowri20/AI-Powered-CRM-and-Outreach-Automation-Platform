@@ -1,5 +1,5 @@
 /* eslint-disable react-refresh/only-export-components */
-import React, { useState, useMemo } from 'react'
+import React, { useState, useMemo, useEffect } from 'react'
 import { Button } from '../../components/ui/Button'
 import { Input } from '../../components/ui/Input'
 import { Modal } from '../../components/ui/Modal'
@@ -72,11 +72,20 @@ export const CANONICAL_SOURCES = [
   },
 ]
 
-// Provisional UI defaults: 500/500 allocation is inferred from the global 1000 credit monthly budget.
+// Provisional provider credit budgets (500 / 500 inferred from global 1,000 credit monthly budget)
+export const PROVISIONAL_PROVIDER_MONTHLY_BUDGETS = {
+  contactout: '500',
+  snov: '500',
+}
+
+// Daily outreach send limit default
+export const PROVISIONAL_DAILY_SEND_LIMIT = '100'
+
+// Consolidated provisional budget defaults
 export const PROVISIONAL_BUDGET_DEFAULTS = {
-  contactoutMonthly: '500',
-  snovMonthly: '500',
-  dailySendLimit: '100',
+  contactoutMonthly: PROVISIONAL_PROVIDER_MONTHLY_BUDGETS.contactout,
+  snovMonthly: PROVISIONAL_PROVIDER_MONTHLY_BUDGETS.snov,
+  dailySendLimit: PROVISIONAL_DAILY_SEND_LIMIT,
 }
 
 export const BUDGET_FIELD_LABELS = {
@@ -89,6 +98,65 @@ export const BUDGET_FIELD_UNITS = {
   contactoutMonthly: 'credits',
   snovMonthly: 'credits',
   dailySendLimit: 'emails/day',
+}
+
+/* ----------------------------------------------------------------------------
+ * In-File Mock API Layer (FE-31)
+ *
+ * NOTE: There are no scraper source or budget configuration endpoints in
+ * contracts/openapi.yaml. Per architecture guidelines, we NEVER call invented
+ * or fictitious backend endpoints.
+ *
+ * When VITE_USE_MOCKS !== 'false' (default dev/demo mode), state changes update
+ * an in-memory session store mimicking frontend/src/api/enrichment.js.
+ * All changes reset on page refresh.
+ *
+ * When VITE_USE_MOCKS === 'false', the UI operates in local contract mode and informs
+ * the user that backend configuration endpoints are pending contract implementation.
+ * ------------------------------------------------------------------------- */
+export const USE_MOCKS = import.meta.env.VITE_USE_MOCKS !== 'false'
+
+let mockSourcesStore = CANONICAL_SOURCES.map((s) => ({ ...s }))
+let mockBudgetsStore = { ...PROVISIONAL_BUDGET_DEFAULTS }
+
+export async function fetchSources() {
+  if (USE_MOCKS) {
+    return mockSourcesStore.map((s) => ({ ...s }))
+  }
+  // When USE_MOCKS is false, do not invent backend endpoints.
+  // Return canonical seed sources and let UI indicate offline contract mode.
+  return CANONICAL_SOURCES.map((s) => ({ ...s }))
+}
+
+export async function updateSourceToggle(sourceId, targetEnabled) {
+  if (USE_MOCKS) {
+    mockSourcesStore = mockSourcesStore.map((s) =>
+      s.id === sourceId ? { ...s, isEnabled: targetEnabled } : s
+    )
+    const updated = mockSourcesStore.find((s) => s.id === sourceId)
+    return { success: true, source: { ...updated } }
+  }
+  throw new Error('Backend configuration service unavailable: endpoints pending contract change request.')
+}
+
+export async function fetchBudgetSettings() {
+  if (USE_MOCKS) {
+    return { ...mockBudgetsStore }
+  }
+  return { ...PROVISIONAL_BUDGET_DEFAULTS }
+}
+
+export async function updateBudgetSettings(newBudgets) {
+  if (USE_MOCKS) {
+    mockBudgetsStore = { ...newBudgets }
+    return { success: true, budgets: { ...mockBudgetsStore } }
+  }
+  throw new Error('Backend configuration service unavailable: endpoints pending contract change request.')
+}
+
+export function resetMockApiStores() {
+  mockSourcesStore = CANONICAL_SOURCES.map((s) => ({ ...s }))
+  mockBudgetsStore = { ...PROVISIONAL_BUDGET_DEFAULTS }
 }
 
 export function validateBudgetField(value) {
@@ -124,14 +192,41 @@ export function validateBudgetForm(formValues) {
   return errors
 }
 
-export default function SourcesPage() {
-  const [sources, setSources] = useState(CANONICAL_SOURCES)
+export default function SourcesPage({ initialSources } = {}) {
+  const [sources, setSources] = useState(initialSources || mockSourcesStore)
   const [statusFilter, setStatusFilter] = useState('all')
-  const [committedBudgets, setCommittedBudgets] = useState(PROVISIONAL_BUDGET_DEFAULTS)
-  const [budgetForm, setBudgetForm] = useState(PROVISIONAL_BUDGET_DEFAULTS)
+  const [committedBudgets, setCommittedBudgets] = useState(mockBudgetsStore)
+  const [budgetForm, setBudgetForm] = useState(mockBudgetsStore)
   const [formErrors, setFormErrors] = useState({})
   const [activeModal, setActiveModal] = useState(null)
   const [notification, setNotification] = useState(null)
+
+  useEffect(() => {
+    let isMounted = true
+    async function loadData() {
+      try {
+        const [srcs, bgts] = await Promise.all([fetchSources(), fetchBudgetSettings()])
+        if (isMounted) {
+          if (!initialSources) {
+            setSources(srcs)
+          }
+          setCommittedBudgets(bgts)
+          setBudgetForm(bgts)
+        }
+      } catch (err) {
+        if (isMounted) {
+          setNotification({
+            type: 'error',
+            message: err?.message || 'Failed to load configuration data.',
+          })
+        }
+      }
+    }
+    loadData()
+    return () => {
+      isMounted = false
+    }
+  }, [initialSources])
 
   const enabledCount = useMemo(
     () => sources.filter((s) => s.isEnabled).length,
@@ -187,6 +282,16 @@ export default function SourcesPage() {
     if (!activeModal || activeModal.type !== 'source_toggle') return
     const { source: targetSource, targetEnabled } = activeModal
 
+    setActiveModal(null)
+
+    // Call in-file mock API layer asynchronously
+    updateSourceToggle(targetSource.id, targetEnabled).catch((err) => {
+      setNotification({
+        type: 'error',
+        message: err?.message || 'Failed to update scraper source status in API layer.',
+      })
+    })
+
     setSources((prev) =>
       prev.map((s) =>
         s.id === targetSource.id ? { ...s, isEnabled: targetEnabled } : s
@@ -194,12 +299,15 @@ export default function SourcesPage() {
     )
 
     const newStatusText = targetEnabled ? 'enabled' : 'disabled'
+    const unhealthyWarning =
+      targetEnabled && (targetSource.status === 'disabled' || targetSource.status === 'quarantined')
+        ? ` Note: Source has status "${targetSource.status}" and will not run until healthy.`
+        : ''
+
     setNotification({
       type: 'success',
-      message: `Scraper source "${targetSource.name}" has been ${newStatusText} (in-memory demo state).`,
+      message: `Scraper source "${targetSource.name}" has been ${newStatusText} (in-memory demo state).${unhealthyWarning}`,
     })
-
-    setActiveModal(null)
   }
 
   function handleRequestBudgetSave(e) {
@@ -237,6 +345,16 @@ export default function SourcesPage() {
     if (!activeModal || activeModal.type !== 'budget_update' || !activeModal.snapshot) return
 
     const committed = activeModal.snapshot
+    setActiveModal(null)
+
+    // Call in-file mock API layer asynchronously
+    updateBudgetSettings(committed).catch((err) => {
+      setNotification({
+        type: 'error',
+        message: err?.message || 'Failed to update budget settings in API layer.',
+      })
+    })
+
     setCommittedBudgets(committed)
     setBudgetForm(committed)
     setFormErrors({})
@@ -245,8 +363,6 @@ export default function SourcesPage() {
       type: 'success',
       message: 'Budget and send limit configuration updated (in-memory demo state).',
     })
-
-    setActiveModal(null)
   }
 
   function handleResetForm() {
@@ -266,6 +382,24 @@ export default function SourcesPage() {
           Manage scraper source availability, monthly enrichment provider budgets, and daily outreach send limits.
         </p>
       </div>
+
+      {!USE_MOCKS && (
+        <div
+          role="region"
+          aria-label="Offline Contract Notice"
+          style={{
+            backgroundColor: 'var(--color-bg-subtle)',
+            border: '1px solid #f59e0b',
+            borderRadius: 'var(--radius-md)',
+            padding: '12px 16px',
+            marginBottom: '20px',
+            fontSize: '13px',
+            color: 'var(--color-text-main)',
+          }}
+        >
+          <strong>Offline Contract Mode:</strong> Backend configuration endpoints are not defined in the OpenAPI contract. Running in offline fallback mode without inventing fictitious backend endpoints.
+        </div>
+      )}
 
       <div
         role="region"
@@ -305,9 +439,9 @@ export default function SourcesPage() {
           style={{
             padding: '12px 16px',
             borderRadius: 'var(--radius-md)',
-            backgroundColor: notification.type === 'success' ? 'var(--color-score-high-bg)' : 'var(--color-primary-light)',
-            color: notification.type === 'success' ? 'var(--color-score-high)' : 'var(--color-primary)',
-            border: `1px solid ${notification.type === 'success' ? 'rgba(21, 128, 61, 0.3)' : 'rgba(37, 99, 235, 0.3)'}`,
+            backgroundColor: notification.type === 'success' ? 'var(--color-score-high-bg)' : 'var(--color-score-low-bg, #fee2e2)',
+            color: notification.type === 'success' ? 'var(--color-score-high)' : 'var(--color-score-low, #991b1b)',
+            border: `1px solid ${notification.type === 'success' ? 'rgba(21, 128, 61, 0.3)' : 'rgba(220, 38, 38, 0.3)'}`,
             marginBottom: '24px',
             fontSize: '13px',
             display: 'flex',
@@ -622,6 +756,30 @@ export default function SourcesPage() {
             <p style={{ fontSize: '14px', color: 'var(--color-text-main)', margin: 0 }}>
               Are you sure you want to change the scraper state for <strong>{activeModal.source.name}</strong>?
             </p>
+
+            {activeModal.targetEnabled &&
+              (activeModal.source.status === 'disabled' || activeModal.source.status === 'quarantined') && (
+                <div
+                  role="alert"
+                  style={{
+                    padding: '10px 14px',
+                    borderRadius: 'var(--radius-md)',
+                    backgroundColor: '#fffbeb',
+                    border: '1px solid #fcd34d',
+                    color: '#92400e',
+                    fontSize: '13px',
+                    lineHeight: 1.4,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '8px',
+                  }}
+                >
+                  <span aria-hidden="true">⚠️</span>
+                  <span>
+                    <strong>Warning:</strong> Scraper source status is currently <code>{activeModal.source.status}</code> and will not run until healthy.
+                  </span>
+                </div>
+              )}
 
             <table
               style={{
