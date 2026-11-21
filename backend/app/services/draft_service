@@ -1,0 +1,131 @@
+
+from typing import Any, Dict, Optional
+
+
+class DraftService:
+    """
+    Handles campaign draft generation.
+
+    Responsibilities:
+    - Check lead/opportunity eligibility
+    - Build verified facts
+    - Generate AI draft
+    - Validate AI output
+    - Retry failed AI validation once
+    - Persist campaign draft
+    """
+
+    def __init__(self, db, gemini_client):
+        self.db = db
+        self.gemini_client = gemini_client
+
+    def generate_draft(
+        self,
+        campaign_id: str,
+        opportunity_id: str,
+        recipient_contact_method_id: str,
+        tone: str = "hr",
+    ) -> Dict[str, Any]:
+
+        opportunity = self._get_opportunity(opportunity_id)
+
+        if opportunity is None:
+            raise ValueError("Opportunity not found")
+
+        if not self._is_eligible(opportunity):
+            raise ValueError(
+                "Opportunity is not eligible for draft generation"
+            )
+
+        verified_facts = self._build_verified_facts(opportunity)
+
+        ai_output = None
+
+        for attempt in range(2):
+            ai_output = self._generate_ai_draft(
+                verified_facts=verified_facts,
+                tone=tone,
+            )
+
+            if self._validate_ai_output(ai_output, verified_facts):
+                break
+
+            ai_output = None
+
+        if ai_output is None:
+            return self._save_draft(
+                campaign_id=campaign_id,
+                opportunity_id=opportunity_id,
+                recipient_contact_method_id=recipient_contact_method_id,
+                status="needs_review",
+                ai_output=None,
+            )
+
+        return self._save_draft(
+            campaign_id=campaign_id,
+            opportunity_id=opportunity_id,
+            recipient_contact_method_id=recipient_contact_method_id,
+            status="generated",
+            ai_output=ai_output,
+        )
+
+    def _get_opportunity(self, opportunity_id: str):
+        raise NotImplementedError
+
+    def _is_eligible(self, opportunity) -> bool:
+        return opportunity.status == "eligible"
+
+    def _build_verified_facts(self, opportunity) -> Dict[str, Any]:
+        facts = {}
+
+        if getattr(opportunity, "role", None):
+            facts["fact_role"] = opportunity.role
+
+        if getattr(opportunity, "source", None):
+            facts["fact_source"] = opportunity.source
+
+        if getattr(opportunity, "company_name", None):
+            facts["fact_company"] = opportunity.company_name
+
+        if getattr(opportunity, "location", None):
+            facts["fact_location"] = opportunity.location
+
+        return facts
+
+    def _generate_ai_draft(
+        self,
+        verified_facts: Dict[str, Any],
+        tone: str,
+    ) -> Dict[str, Any]:
+
+        return self.gemini_client.generate_draft(
+            verified_facts=verified_facts,
+            tone=tone,
+        )
+
+    def _validate_ai_output(
+        self,
+        ai_output: Optional[Dict[str, Any]],
+        verified_facts: Dict[str, Any],
+    ) -> bool:
+
+        if not ai_output:
+            return False
+
+        if not ai_output.get("subject"):
+            return False
+
+        if not ai_output.get("body"):
+            return False
+
+        return True
+
+    def _save_draft(
+        self,
+        campaign_id: str,
+        opportunity_id: str,
+        recipient_contact_method_id: str,
+        status: str,
+        ai_output: Optional[Dict[str, Any]],
+    ):
+        raise NotImplementedError
