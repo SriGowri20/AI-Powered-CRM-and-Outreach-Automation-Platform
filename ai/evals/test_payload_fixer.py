@@ -27,6 +27,7 @@ def make_response(changes, corrected_payload=None, retry=None):
 
 def test_valid_integer_conversion():
     payload = {"age": "20"}
+
     response = make_response(
         [{"path": "age", "issue": "Expected integer", "new_value": 20}],
         {"age": 20},
@@ -45,6 +46,7 @@ def test_valid_integer_conversion():
 
 def test_reject_invented_value():
     payload = {"age": "wrong"}
+
     response = make_response(
         [{"path": "age", "issue": "Expected integer", "new_value": 20}],
         {"age": 20},
@@ -63,6 +65,7 @@ def test_reject_invented_value():
 
 def test_missing_required_field():
     payload = {"name": "Test"}
+
     response = make_response(
         [{
             "path": "email",
@@ -115,6 +118,7 @@ def test_nested_array_conversion():
 
 def test_uncertain_iso_date():
     payload = {"delivery_date": "20/11/2026"}
+
     response = make_response(
         [{
             "path": "delivery_date",
@@ -161,7 +165,9 @@ def test_api_failure_fallback():
     result = suggest_payload_fix(
         {"name": "Test"},
         "Validation error",
-        client=FakeGeminiClient(error=TimeoutError("API timeout")),
+        client=FakeGeminiClient(
+            error=TimeoutError("API timeout")
+        ),
     )
 
     assert result["corrected_payload"] is None
@@ -230,4 +236,161 @@ def test_valid_retry_parameters():
         "retry_count": 2,
         "delay_seconds": 30,
         "batch_size": 100,
+    }
+
+
+def test_preserves_email_and_api_key():
+    """Corrections must preserve original sensitive values."""
+    payload = {
+        "email": "user@example.com",
+        "api_key": "secret123",
+        "age": "20",
+    }
+
+    response = make_response(
+        [{
+            "path": "age",
+            "issue": "Expected integer",
+            "new_value": 20,
+        }]
+    )
+
+    result = suggest_payload_fix(
+        payload,
+        "age must be integer",
+        client=FakeGeminiClient(response),
+    )
+
+    assert result["corrected_payload"] == {
+        "email": "user@example.com",
+        "api_key": "secret123",
+        "age": 20,
+    }
+
+    assert payload == {
+        "email": "user@example.com",
+        "api_key": "secret123",
+        "age": "20",
+    }
+
+
+@pytest.mark.parametrize(
+    "sensitive_field",
+    ["email", "api_key"],
+)
+def test_rejects_sensitive_field_changes(sensitive_field):
+    """Gemini must not automatically modify sensitive fields."""
+    payload = {
+        "email": "user@example.com",
+        "api_key": "secret123",
+    }
+
+    response = make_response(
+        [{
+            "path": sensitive_field,
+            "issue": "Expected integer",
+            "new_value": 123,
+        }]
+    )
+
+    result = suggest_payload_fix(
+        payload,
+        "Invalid field type",
+        client=FakeGeminiClient(response),
+    )
+
+    assert result["corrected_payload"] is None
+    assert result["changes"] == []
+    assert result["needs_human_input"]
+
+
+@pytest.mark.parametrize(
+    "retry_params",
+    [
+        {"retry_count": 6},
+        {"delay_seconds": 3601},
+    ],
+)
+def test_retry_safety_limits(retry_params):
+    """Reject retry suggestions exceeding configured limits."""
+    response = make_response(
+        [],
+        retry=retry_params,
+    )
+
+    result = suggest_payload_fix(
+        {"job_id": "123"},
+        "Temporary processing failure",
+        category="temporary_error",
+        client=FakeGeminiClient(response),
+    )
+
+    assert result["retry_parameters"] is None
+    assert result["needs_human_input"]
+
+
+def test_blocked_retry_category_case_insensitive():
+    """Blocked retry categories must be case-insensitive."""
+    response = make_response(
+        [],
+        retry={"retry_count": 2},
+    )
+
+    result = suggest_payload_fix(
+        {"job_id": "123"},
+        "Delivery failed",
+        category="SEND_TIMEOUT",
+        client=FakeGeminiClient(response),
+    )
+
+    assert result["retry_parameters"] is None
+
+
+def test_gemini_receives_redacted_sensitive_data():
+    """Gemini must not receive original sensitive values."""
+
+    class CapturingGeminiClient(FakeGeminiClient):
+        def generate(self, prompt, schema=None, temperature=0.1):
+            self.captured_prompt = prompt
+            return super().generate(
+                prompt,
+                schema=schema,
+                temperature=temperature,
+            )
+
+    payload = {
+        "email": "private.user@example.com",
+        "api_key": "super-secret-api-key-123",
+        "age": "20",
+    }
+
+    response = make_response([
+        {
+            "path": "age",
+            "issue": "Expected integer",
+            "new_value": 20,
+        }
+    ])
+
+    client = CapturingGeminiClient(response)
+
+    result = suggest_payload_fix(
+        payload,
+        "age must be integer",
+        client=client,
+    )
+
+    assert "private.user@example.com" not in client.captured_prompt
+    assert "super-secret-api-key-123" not in client.captured_prompt
+
+    assert result["corrected_payload"] == {
+        "email": "private.user@example.com",
+        "api_key": "super-secret-api-key-123",
+        "age": 20,
+    }
+
+    assert payload == {
+        "email": "private.user@example.com",
+        "api_key": "super-secret-api-key-123",
+        "age": "20",
     }

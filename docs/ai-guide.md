@@ -393,5 +393,3 @@ python -m pytest ai/evals/ -q
 ```
 
 The tests cover type conversions, missing fields, nested arrays, uncertain dates, blocked retry categories, retry-parameter validation, and API failure handling.
-
-Latest local test result: 184 passed.
