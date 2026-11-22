@@ -1,23 +1,47 @@
 
-from typing import Any, Dict, Optional
+"""
+Service for generating campaign email drafts.
+
+Uses direct SQL with psycopg3.
+Does not send or dispatch emails.
+"""
+
+import json
+import logging
+from pathlib import Path
+from typing import Any, Dict
+
+from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
+
+from backend.app.core.db import get_conn, transaction
+
+from ai.gemini_client import GeminiClient
+from backend.app.services.eligibility import is_eligible_for_campaign
+from ai.validators.fact_check import fact_check_draft
+
+logger = logging.getLogger(__name__)
+
+PROMPT_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "ai"
+    / "prompts"
+    / "email_draft_v1.md"
+)
+
+
+class IneligibleLeadError(Exception):
+    """Opportunity is not eligible for campaign outreach."""
 
 
 class DraftService:
-    """
-    Handles campaign draft generation.
 
-    Responsibilities:
-    - Check lead/opportunity eligibility
-    - Build verified facts
-    - Generate AI draft
-    - Validate AI output
-    - Retry failed AI validation once
-    - Persist campaign draft
-    """
-
-    def __init__(self, db, gemini_client):
+    def __init__(self, db=None, gemini_client=None):
+        """
+        Dependencies can be injected for testing.
+        """
         self.db = db
-        self.gemini_client = gemini_client
+        self.gemini_client = gemini_client or GeminiClient()
 
     def generate_draft(
         self,
@@ -27,105 +51,208 @@ class DraftService:
         tone: str = "hr",
     ) -> Dict[str, Any]:
 
+        # 1. Fetch opportunity and related verified facts.
         opportunity = self._get_opportunity(opportunity_id)
 
-        if opportunity is None:
-            raise ValueError("Opportunity not found")
+        if not opportunity:
+            raise ValueError("Opportunity not found.")
 
-        if not self._is_eligible(opportunity):
-            raise ValueError(
-                "Opportunity is not eligible for draft generation"
+        # 2. Check eligibility using the project's eligibility function.
+        eligible = is_eligible_for_campaign(opportunity)
+
+        if not eligible:
+            raise IneligibleLeadError(
+                "This lead is not eligible for campaign outreach."
             )
 
-        verified_facts = self._build_verified_facts(opportunity)
+        # 3. Fetch campaign and contact information.
+        campaign, contact = self._get_campaign_and_contact(
+            campaign_id,
+            recipient_contact_method_id,
+        )
+
+        if not campaign:
+            raise ValueError("Campaign not found.")
+
+        if not contact:
+            raise ValueError("Recipient contact method not found.")
+
+        # 4. Build facts using verified database fields only.
+        facts = {
+            "campaign": campaign,
+            "opportunity": opportunity,
+            "recipient": contact,
+        }
+
+        # 5. Load the existing AI-08 prompt.
+        prompt_template = PROMPT_PATH.read_text(encoding="utf-8")
+
+        prompt = (
+            prompt_template
+            + "\n\n"
+            + "Tone: "
+            + tone
+            + "\n\nVerified facts:\n"
+            + json.dumps(facts, default=str)
+        )
 
         ai_output = None
+        validation_issues = []
 
+        # 6. Generate and validate. Maximum two attempts.
         for attempt in range(2):
-            ai_output = self._generate_ai_draft(
-                verified_facts=verified_facts,
-                tone=tone,
-            )
 
-            if self._validate_ai_output(ai_output, verified_facts):
+            # Generate AI output.
+            ai_output = self.gemini_client.generate(prompt)
+
+            if not isinstance(ai_output, dict):
+                validation_issues = [
+                    "AI output must be a dictionary."
+                ]
+
+                logger.warning(
+                    "AI output validation failed on attempt %s",
+                    attempt + 1,
+                )
+                continue
+
+            # Validate subject length.
+            subject = ai_output.get("subject", "")
+
+            if not isinstance(subject, str) or len(subject) > 80:
+                is_valid = False
+                issues = [
+                    "Email subject must be 80 characters or fewer."
+                ]
+            else:
+                # Validate claims against verified facts.
+                is_valid, issues = fact_check_draft(
+                    draft=ai_output,
+                    verified_facts=facts,
+                )
+
+            if is_valid:
+                validation_issues = []
                 break
 
-            ai_output = None
+            validation_issues = issues
 
-        if ai_output is None:
-            return self._save_draft(
-                campaign_id=campaign_id,
-                opportunity_id=opportunity_id,
-                recipient_contact_method_id=recipient_contact_method_id,
-                status="needs_review",
-                ai_output=None,
+            logger.warning(
+                "Draft validation failed on attempt %s: %s",
+                attempt + 1,
+                issues,
             )
 
+        # 7. Decide whether human review is required.
+        if validation_issues:
+            draft_status = "needs_review"
+
+            # ai_output must NEVER be None because the database
+            # column is NOT NULL.
+            if not isinstance(ai_output, dict):
+                ai_output = {}
+
+            ai_output["validation_issues"] = validation_issues
+            ai_output["review_required"] = True
+
+        else:
+            draft_status = "draft"
+
+        # 8. Save the result.
         return self._save_draft(
             campaign_id=campaign_id,
             opportunity_id=opportunity_id,
             recipient_contact_method_id=recipient_contact_method_id,
-            status="generated",
             ai_output=ai_output,
+            draft_status=draft_status,
         )
 
     def _get_opportunity(self, opportunity_id: str):
-        raise NotImplementedError
+        """Fetch opportunity using raw SQL."""
 
-    def _is_eligible(self, opportunity) -> bool:
-        return opportunity.status == "eligible"
+        with get_conn() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM opportunities
+                    WHERE id = %s
+                    """,
+                    (opportunity_id,),
+                )
 
-    def _build_verified_facts(self, opportunity) -> Dict[str, Any]:
-        facts = {}
+                return cur.fetchone()
 
-        if getattr(opportunity, "role", None):
-            facts["fact_role"] = opportunity.role
-
-        if getattr(opportunity, "source", None):
-            facts["fact_source"] = opportunity.source
-
-        if getattr(opportunity, "company_name", None):
-            facts["fact_company"] = opportunity.company_name
-
-        if getattr(opportunity, "location", None):
-            facts["fact_location"] = opportunity.location
-
-        return facts
-
-    def _generate_ai_draft(
+    def _get_campaign_and_contact(
         self,
-        verified_facts: Dict[str, Any],
-        tone: str,
-    ) -> Dict[str, Any]:
+        campaign_id: str,
+        recipient_contact_method_id: str,
+    ):
+        """Fetch campaign and recipient contact records."""
 
-        return self.gemini_client.generate_draft(
-            verified_facts=verified_facts,
-            tone=tone,
-        )
+        with get_conn() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
 
-    def _validate_ai_output(
-        self,
-        ai_output: Optional[Dict[str, Any]],
-        verified_facts: Dict[str, Any],
-    ) -> bool:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM campaigns
+                    WHERE id = %s
+                    """,
+                    (campaign_id,),
+                )
+                campaign = cur.fetchone()
 
-        if not ai_output:
-            return False
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM recipient_contact_methods
+                    WHERE id = %s
+                    """,
+                    (recipient_contact_method_id,),
+                )
+                contact = cur.fetchone()
 
-        if not ai_output.get("subject"):
-            return False
-
-        if not ai_output.get("body"):
-            return False
-
-        return True
+                return campaign, contact
 
     def _save_draft(
         self,
         campaign_id: str,
         opportunity_id: str,
         recipient_contact_method_id: str,
-        status: str,
-        ai_output: Optional[Dict[str, Any]],
+        ai_output: Dict[str, Any],
+        draft_status: str,
     ):
-        raise NotImplementedError
+        """Persist draft using a raw SQL INSERT."""
+
+        with transaction() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    """
+                    INSERT INTO campaign_drafts (
+                        campaign_id,
+                        opportunity_id,
+                        recipient_contact_method_id,
+                        ai_output,
+                        status
+                    )
+                    VALUES (%s, %s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (
+                        campaign_id,
+                        opportunity_id,
+                        recipient_contact_method_id,
+                        Jsonb(ai_output),
+                        draft_status,
+                    ),
+                )
+
+                saved = cur.fetchone()
+
+        return {
+            "draft_id": str(saved["id"]),
+            "campaign_id": campaign_id,
+            "status": draft_status,
+            "ai_output": ai_output,
+        }
