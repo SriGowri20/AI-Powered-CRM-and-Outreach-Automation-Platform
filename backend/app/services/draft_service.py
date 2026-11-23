@@ -33,6 +33,8 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 PROMPT_DIR = REPO_ROOT / "ai" / "prompts"
 BASE_PROMPT_PATH = PROMPT_DIR / "email_draft_v1.md"
 
+PROMPT_PATH = BASE_PROMPT_PATH
+
 TONE_PROMPT_PATHS = {
     "hr": PROMPT_DIR / "tone_hr.md",
     "tpo": PROMPT_DIR / "tone_tpo.md",
@@ -244,9 +246,9 @@ class DraftService:
         verified_facts: Dict[str, Any],
     ) -> str:
 
-        if not BASE_PROMPT_PATH.is_file():
+        if not PROMPT_PATH.is_file():
             raise FileNotFoundError(
-                f"Base prompt file not found: {BASE_PROMPT_PATH}"
+                f"Base prompt file not found: {PROMPT_PATH}"
             )
 
         tone_path = TONE_PROMPT_PATHS[tone]
@@ -256,7 +258,7 @@ class DraftService:
                 f"Tone prompt file not found: {tone_path}"
             )
 
-        base_prompt = BASE_PROMPT_PATH.read_text(encoding="utf-8")
+        base_prompt = PROMPT_PATH.read_text(encoding="utf-8")
         tone_prompt = tone_path.read_text(encoding="utf-8")
 
         return (
