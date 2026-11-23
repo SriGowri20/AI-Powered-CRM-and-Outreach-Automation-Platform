@@ -1,13 +1,14 @@
 /* @vitest-environment jsdom */
 
 import React from 'react'
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { render, screen, fireEvent, cleanup } from '@testing-library/react'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { render, screen, fireEvent, cleanup, waitFor, act } from '@testing-library/react'
 import SourcesPage, {
   CANONICAL_SOURCES,
   PROVISIONAL_PROVIDER_MONTHLY_BUDGETS,
   PROVISIONAL_DAILY_SEND_LIMIT,
   PROVISIONAL_BUDGET_DEFAULTS,
+  sourcesApi,
   fetchSources,
   updateSourceToggle,
   fetchBudgetSettings,
@@ -18,9 +19,16 @@ import SourcesPage, {
 } from './Sources'
 
 describe('FE-31: Admin Source Registry & Budget Configuration', () => {
+  beforeEach(() => {
+    // Explicitly enable mock mode for FE-31 tests matching repository convention
+    import.meta.env.VITE_USE_MOCKS = 'true'
+    resetMockApiStores()
+  })
+
   afterEach(() => {
     cleanup()
     resetMockApiStores()
+    vi.restoreAllMocks()
   })
 
   describe('Validation Functions Unit Tests', () => {
@@ -204,21 +212,95 @@ describe('FE-31: Admin Source Registry & Budget Configuration', () => {
       expect(screen.getByText('7 Active')).toBeTruthy()
     })
 
-    it('applies exact proposed boolean state upon confirmation', () => {
+    it('applies exact proposed boolean state upon confirmation after async API call succeeds', async () => {
       const internshalaSwitch = screen.getByLabelText('Toggle scraper for Internshala')
       fireEvent.click(internshalaSwitch)
 
       const confirmButton = screen.getByRole('button', { name: /confirm disabled/i })
       fireEvent.click(confirmButton)
 
-      expect(screen.queryByRole('dialog')).toBeNull()
+      await waitFor(() => {
+        expect(screen.queryByRole('dialog')).toBeNull()
+      })
+
       expect(internshalaSwitch.getAttribute('aria-checked')).toBe('false')
       expect(screen.getByText('6 Active')).toBeTruthy()
       expect(screen.getByText('2 Disabled')).toBeTruthy()
       expect(screen.getByText(/Scraper source "Internshala" has been disabled/i)).toBeTruthy()
     })
 
-    it('displays warning note when enabling a source whose status is disabled or quarantined', () => {
+    it('prevents duplicate submissions on rapid multiple clicks during source toggle and disables buttons while pending', async () => {
+      let resolvePromise
+      const deferred = new Promise((resolve) => {
+        resolvePromise = resolve
+      })
+      const spy = vi.spyOn(sourcesApi, 'updateSourceToggle').mockReturnValue(deferred)
+
+      const internshalaSwitch = screen.getByLabelText('Toggle scraper for Internshala')
+      fireEvent.click(internshalaSwitch)
+
+      expect(screen.getByRole('dialog')).toBeTruthy()
+      const confirmButton = screen.getByRole('button', { name: /confirm disabled/i })
+      const cancelButton = screen.getByRole('button', { name: /cancel/i })
+
+      // Click Confirm twice rapidly before API promise resolves
+      fireEvent.click(confirmButton)
+      fireEvent.click(confirmButton)
+
+      // Verify update API is called exactly once
+      expect(spy).toHaveBeenCalledTimes(1)
+      expect(spy).toHaveBeenCalledWith('internshala', false)
+
+      // Verify Confirm and Cancel are disabled while request is pending
+      expect(confirmButton.disabled).toBe(true)
+      expect(cancelButton.disabled).toBe(true)
+
+      // Resolve the promise
+      await act(async () => {
+        resolvePromise({ success: true, source: { id: 'internshala', isEnabled: false } })
+      })
+
+      // Verify modal closes and success state updates
+      await waitFor(() => {
+        expect(screen.queryByRole('dialog')).toBeNull()
+      })
+      expect(internshalaSwitch.getAttribute('aria-checked')).toBe('false')
+      expect(screen.getByText(/Scraper source "Internshala" has been disabled/i)).toBeTruthy()
+      spy.mockRestore()
+    })
+
+    it('preserves existing source state, shows error notification, and keeps confirmation modal open when updateSourceToggle fails', async () => {
+      // Disable mock mode to simulate API failure
+      import.meta.env.VITE_USE_MOCKS = 'false'
+
+      const internshalaSwitch = screen.getByLabelText('Toggle scraper for Internshala')
+      fireEvent.click(internshalaSwitch)
+
+      expect(screen.getByRole('dialog')).toBeTruthy()
+      const confirmButton = screen.getByRole('button', { name: /confirm disabled/i })
+      fireEvent.click(confirmButton)
+
+      // Await error notification
+      await waitFor(() => {
+        expect(
+          screen.getByText(/Failed to update scraper source status in API layer|Backend configuration service unavailable/i)
+        ).toBeTruthy()
+      })
+
+      // Modal must remain open so user can retry or cancel
+      expect(screen.getByRole('dialog')).toBeTruthy()
+      // Source state must NOT have changed
+      expect(internshalaSwitch.getAttribute('aria-checked')).toBe('true')
+      expect(screen.getByText('7 Active')).toBeTruthy()
+      expect(screen.queryByText(/has been disabled \(in-memory demo state\)/i)).toBeNull()
+
+      // User can cancel and close modal
+      const cancelButton = screen.getByRole('button', { name: /cancel/i })
+      fireEvent.click(cancelButton)
+      expect(screen.queryByRole('dialog')).toBeNull()
+    })
+
+    it('displays warning note when enabling a source whose status is disabled or quarantined', async () => {
       cleanup()
       const unhealthySources = [
         {
@@ -242,6 +324,10 @@ describe('FE-31: Admin Source Registry & Budget Configuration', () => {
 
       const confirmBtn = screen.getByRole('button', { name: /confirm enabled/i })
       fireEvent.click(confirmBtn)
+
+      await waitFor(() => {
+        expect(screen.queryByRole('dialog')).toBeNull()
+      })
       expect(screen.getByText(/will not run until healthy/i)).toBeTruthy()
     })
   })
@@ -291,7 +377,7 @@ describe('FE-31: Admin Source Registry & Budget Configuration', () => {
       expect(desc.textContent).not.toContain('900')
     })
 
-    it('commits exact snapshot values upon confirmation', () => {
+    it('commits exact snapshot values upon confirmation after async API call succeeds', async () => {
       const contactoutInput = screen.getByLabelText(/contactout monthly budget/i)
       fireEvent.change(contactoutInput, { target: { value: '950' } })
 
@@ -301,13 +387,96 @@ describe('FE-31: Admin Source Registry & Budget Configuration', () => {
       const confirmButton = screen.getByRole('button', { name: /confirm & apply changes/i })
       fireEvent.click(confirmButton)
 
-      expect(screen.queryByRole('dialog')).toBeNull()
+      await waitFor(() => {
+        expect(screen.queryByRole('dialog')).toBeNull()
+      })
+
       expect(screen.getByText(/Budget and send limit configuration updated/i)).toBeTruthy()
       const desc = document.getElementById('budget-contactout-desc')
       expect(desc.textContent).toContain('950')
     })
 
-    it('commits the exact snapshot shown in dialog even if form input changes afterward', () => {
+    it('prevents duplicate submissions on rapid multiple clicks during budget save and disables buttons while pending', async () => {
+      let resolvePromise
+      const deferred = new Promise((resolve) => {
+        resolvePromise = resolve
+      })
+      const spy = vi.spyOn(sourcesApi, 'updateBudgetSettings').mockReturnValue(deferred)
+
+      const contactoutInput = screen.getByLabelText(/contactout monthly budget/i)
+      fireEvent.change(contactoutInput, { target: { value: '850' } })
+
+      const reviewButton = screen.getByRole('button', { name: /review & save budget changes/i })
+      fireEvent.click(reviewButton)
+
+      expect(screen.getByRole('dialog')).toBeTruthy()
+      const confirmButton = screen.getByRole('button', { name: /confirm & apply changes/i })
+      const cancelButton = screen.getByRole('button', { name: /cancel/i })
+
+      // Click Confirm twice rapidly before API promise resolves
+      fireEvent.click(confirmButton)
+      fireEvent.click(confirmButton)
+
+      // Verify update API is called exactly once
+      expect(spy).toHaveBeenCalledTimes(1)
+
+      // Verify Confirm and Cancel are disabled while request is pending
+      expect(confirmButton.disabled).toBe(true)
+      expect(cancelButton.disabled).toBe(true)
+
+      // Resolve the promise
+      await act(async () => {
+        resolvePromise({
+          success: true,
+          budgets: { contactoutMonthly: '850', snovMonthly: '500', dailySendLimit: '100' },
+        })
+      })
+
+      // Verify modal closes and success state updates
+      await waitFor(() => {
+        expect(screen.queryByRole('dialog')).toBeNull()
+      })
+      const desc = document.getElementById('budget-contactout-desc')
+      expect(desc.textContent).toContain('850')
+      expect(screen.getByText(/Budget and send limit configuration updated/i)).toBeTruthy()
+      spy.mockRestore()
+    })
+
+    it('preserves existing budget values, shows error notification, and keeps confirmation modal open when updateBudgetSettings fails', async () => {
+      // Disable mock mode to simulate API failure
+      import.meta.env.VITE_USE_MOCKS = 'false'
+
+      const contactoutInput = screen.getByLabelText(/contactout monthly budget/i)
+      fireEvent.change(contactoutInput, { target: { value: '880' } })
+
+      const saveButton = screen.getByRole('button', { name: /review & save budget changes/i })
+      fireEvent.click(saveButton)
+
+      expect(screen.getByRole('dialog')).toBeTruthy()
+      const confirmButton = screen.getByRole('button', { name: /confirm & apply changes/i })
+      fireEvent.click(confirmButton)
+
+      await waitFor(() => {
+        expect(
+          screen.getByText(/Failed to update budget settings in API layer|Backend configuration service unavailable/i)
+        ).toBeTruthy()
+      })
+
+      // Modal must remain open
+      expect(screen.getByRole('dialog')).toBeTruthy()
+      // Committed budget NOT updated
+      const desc = document.getElementById('budget-contactout-desc')
+      expect(desc.textContent).toContain('500')
+      expect(desc.textContent).not.toContain('880')
+      expect(screen.queryByText(/Budget and send limit configuration updated/i)).toBeNull()
+
+      // User can cancel out
+      const cancelButton = screen.getByRole('button', { name: /cancel/i })
+      fireEvent.click(cancelButton)
+      expect(screen.queryByRole('dialog')).toBeNull()
+    })
+
+    it('commits the exact snapshot shown in dialog even if form input changes afterward', async () => {
       const contactoutInput = screen.getByLabelText(/contactout monthly budget/i)
 
       // 1. Change ContactOut budget from 500 to 950
@@ -326,8 +495,11 @@ describe('FE-31: Admin Source Registry & Budget Configuration', () => {
       const confirmButton = screen.getByRole('button', { name: /confirm & apply changes/i })
       fireEvent.click(confirmButton)
 
+      await waitFor(() => {
+        expect(screen.queryByRole('dialog')).toBeNull()
+      })
+
       // 5. Verify that committed budget is still 950, not 975
-      expect(screen.queryByRole('dialog')).toBeNull()
       const desc = document.getElementById('budget-contactout-desc')
       expect(desc.textContent).toContain('950')
       expect(desc.textContent).not.toContain('975')
@@ -407,6 +579,7 @@ describe('FE-31: Admin Source Registry & Budget Configuration', () => {
 
   describe('In-File Mock API Layer Unit Tests', () => {
     beforeEach(() => {
+      import.meta.env.VITE_USE_MOCKS = 'true'
       resetMockApiStores()
     })
 
@@ -441,6 +614,20 @@ describe('FE-31: Admin Source Registry & Budget Configuration', () => {
 
       const fetched = await fetchBudgetSettings()
       expect(fetched).toEqual(newSettings)
+    })
+
+    it('throws contract error on mutations when mock mode is disabled', async () => {
+      import.meta.env.VITE_USE_MOCKS = 'false'
+      await expect(updateSourceToggle('internshala', false)).rejects.toThrow(
+        /Backend configuration service unavailable/i
+      )
+      await expect(
+        updateBudgetSettings({
+          contactoutMonthly: '100',
+          snovMonthly: '100',
+          dailySendLimit: '50',
+        })
+      ).rejects.toThrow(/Backend configuration service unavailable/i)
     })
 
     it('resets stores back to defaults with resetMockApiStores', async () => {

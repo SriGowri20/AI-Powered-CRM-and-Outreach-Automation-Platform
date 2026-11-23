@@ -422,5 +422,5 @@ Colors, score bands, and radii are defined in `src/styles/tokens.css`:
   - Clicking **Review & Save Budget Changes** captures an immutable configuration snapshot and presents a diff table comparing Old Value $\rightarrow$ New Value for only modified fields before applying.
 - **Mock API Architecture**:
   - Because `contracts/openapi.yaml` currently does not define configuration endpoints, an in-file mock API layer (`fetchSources`, `updateSourceToggle`, `fetchBudgetSettings`, `updateBudgetSettings`) is provided inside `Sources.jsx`.
-  - Respects `VITE_USE_MOCKS`. Never makes calls to fictitious or uncontracted backend endpoints.
+  - Respects `VITE_USE_MOCKS === 'true'` following the repository convention. Never makes calls to fictitious or uncontracted backend endpoints.
   - Explicit notices inform users that changes modify in-memory session state only and reset upon page reload.

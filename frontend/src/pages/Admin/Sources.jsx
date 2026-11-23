@@ -1,5 +1,5 @@
 /* eslint-disable react-refresh/only-export-components */
-import React, { useState, useMemo, useEffect } from 'react'
+import React, { useState, useMemo, useEffect, useRef } from 'react'
 import { Button } from '../../components/ui/Button'
 import { Input } from '../../components/ui/Input'
 import { Modal } from '../../components/ui/Modal'
@@ -107,29 +107,28 @@ export const BUDGET_FIELD_UNITS = {
  * contracts/openapi.yaml. Per architecture guidelines, we NEVER call invented
  * or fictitious backend endpoints.
  *
- * When VITE_USE_MOCKS !== 'false' (default dev/demo mode), state changes update
- * an in-memory session store mimicking frontend/src/api/enrichment.js.
- * All changes reset on page refresh.
- *
- * When VITE_USE_MOCKS === 'false', the UI operates in local contract mode and informs
+ * Following the repository convention (frontend/src/api/enrichment.js):
+ * Mock mode is enabled when VITE_USE_MOCKS === 'true'.
+ * When VITE_USE_MOCKS !== 'true', the UI operates in local contract mode and informs
  * the user that backend configuration endpoints are pending contract implementation.
  * ------------------------------------------------------------------------- */
-export const USE_MOCKS = import.meta.env.VITE_USE_MOCKS !== 'false'
+export const isMockMode = () => import.meta.env.VITE_USE_MOCKS === 'true'
+export const USE_MOCKS = import.meta.env.VITE_USE_MOCKS === 'true'
 
 let mockSourcesStore = CANONICAL_SOURCES.map((s) => ({ ...s }))
 let mockBudgetsStore = { ...PROVISIONAL_BUDGET_DEFAULTS }
 
 export async function fetchSources() {
-  if (USE_MOCKS) {
+  if (isMockMode()) {
     return mockSourcesStore.map((s) => ({ ...s }))
   }
-  // When USE_MOCKS is false, do not invent backend endpoints.
+  // When USE_MOCKS is not 'true', do not invent backend endpoints.
   // Return canonical seed sources and let UI indicate offline contract mode.
   return CANONICAL_SOURCES.map((s) => ({ ...s }))
 }
 
 export async function updateSourceToggle(sourceId, targetEnabled) {
-  if (USE_MOCKS) {
+  if (isMockMode()) {
     mockSourcesStore = mockSourcesStore.map((s) =>
       s.id === sourceId ? { ...s, isEnabled: targetEnabled } : s
     )
@@ -140,14 +139,14 @@ export async function updateSourceToggle(sourceId, targetEnabled) {
 }
 
 export async function fetchBudgetSettings() {
-  if (USE_MOCKS) {
+  if (isMockMode()) {
     return { ...mockBudgetsStore }
   }
   return { ...PROVISIONAL_BUDGET_DEFAULTS }
 }
 
 export async function updateBudgetSettings(newBudgets) {
-  if (USE_MOCKS) {
+  if (isMockMode()) {
     mockBudgetsStore = { ...newBudgets }
     return { success: true, budgets: { ...mockBudgetsStore } }
   }
@@ -157,6 +156,13 @@ export async function updateBudgetSettings(newBudgets) {
 export function resetMockApiStores() {
   mockSourcesStore = CANONICAL_SOURCES.map((s) => ({ ...s }))
   mockBudgetsStore = { ...PROVISIONAL_BUDGET_DEFAULTS }
+}
+
+export const sourcesApi = {
+  fetchSources,
+  updateSourceToggle,
+  fetchBudgetSettings,
+  updateBudgetSettings,
 }
 
 export function validateBudgetField(value) {
@@ -200,12 +206,14 @@ export default function SourcesPage({ initialSources } = {}) {
   const [formErrors, setFormErrors] = useState({})
   const [activeModal, setActiveModal] = useState(null)
   const [notification, setNotification] = useState(null)
+  const [isSubmitting, setIsSubmitting] = useState(false)
+  const isSubmittingRef = useRef(false)
 
   useEffect(() => {
     let isMounted = true
     async function loadData() {
       try {
-        const [srcs, bgts] = await Promise.all([fetchSources(), fetchBudgetSettings()])
+        const [srcs, bgts] = await Promise.all([sourcesApi.fetchSources(), sourcesApi.fetchBudgetSettings()])
         if (isMounted) {
           if (!initialSources) {
             setSources(srcs)
@@ -278,36 +286,44 @@ export default function SourcesPage({ initialSources } = {}) {
     })
   }
 
-  function handleConfirmSourceToggle() {
-    if (!activeModal || activeModal.type !== 'source_toggle') return
+  async function handleConfirmSourceToggle() {
+    if (!activeModal || activeModal.type !== 'source_toggle' || isSubmittingRef.current) return
     const { source: targetSource, targetEnabled } = activeModal
 
-    setActiveModal(null)
+    isSubmittingRef.current = true
+    setIsSubmitting(true)
+    try {
+      await sourcesApi.updateSourceToggle(targetSource.id, targetEnabled)
 
-    // Call in-file mock API layer asynchronously
-    updateSourceToggle(targetSource.id, targetEnabled).catch((err) => {
+      setSources((prev) =>
+        prev.map((s) =>
+          s.id === targetSource.id ? { ...s, isEnabled: targetEnabled } : s
+        )
+      )
+
+      const newStatusText = targetEnabled ? 'enabled' : 'disabled'
+      const unhealthyWarning =
+        targetEnabled && (targetSource.status === 'disabled' || targetSource.status === 'quarantined')
+          ? ` Note: Source has status "${targetSource.status}" and will not run until healthy.`
+          : ''
+
+      setNotification({
+        type: 'success',
+        message: `Scraper source "${targetSource.name}" has been ${newStatusText} (in-memory demo state).${unhealthyWarning}`,
+      })
+
+      // Close modal on successful update only
+      setActiveModal(null)
+    } catch (err) {
+      // Keep previous source state, show error notification, keep modal open for retry/cancel
       setNotification({
         type: 'error',
         message: err?.message || 'Failed to update scraper source status in API layer.',
       })
-    })
-
-    setSources((prev) =>
-      prev.map((s) =>
-        s.id === targetSource.id ? { ...s, isEnabled: targetEnabled } : s
-      )
-    )
-
-    const newStatusText = targetEnabled ? 'enabled' : 'disabled'
-    const unhealthyWarning =
-      targetEnabled && (targetSource.status === 'disabled' || targetSource.status === 'quarantined')
-        ? ` Note: Source has status "${targetSource.status}" and will not run until healthy.`
-        : ''
-
-    setNotification({
-      type: 'success',
-      message: `Scraper source "${targetSource.name}" has been ${newStatusText} (in-memory demo state).${unhealthyWarning}`,
-    })
+    } finally {
+      isSubmittingRef.current = false
+      setIsSubmitting(false)
+    }
   }
 
   function handleRequestBudgetSave(e) {
@@ -341,28 +357,36 @@ export default function SourcesPage({ initialSources } = {}) {
     })
   }
 
-  function handleConfirmBudgetSave() {
-    if (!activeModal || activeModal.type !== 'budget_update' || !activeModal.snapshot) return
-
+  async function handleConfirmBudgetSave() {
+    if (!activeModal || activeModal.type !== 'budget_update' || !activeModal.snapshot || isSubmittingRef.current) return
     const committed = activeModal.snapshot
-    setActiveModal(null)
 
-    // Call in-file mock API layer asynchronously
-    updateBudgetSettings(committed).catch((err) => {
+    isSubmittingRef.current = true
+    setIsSubmitting(true)
+    try {
+      await sourcesApi.updateBudgetSettings(committed)
+
+      setCommittedBudgets(committed)
+      setBudgetForm(committed)
+      setFormErrors({})
+
+      setNotification({
+        type: 'success',
+        message: 'Budget and send limit configuration updated (in-memory demo state).',
+      })
+
+      // Close modal on successful update only
+      setActiveModal(null)
+    } catch (err) {
+      // Preserve existing budget values, show error notification, keep modal open
       setNotification({
         type: 'error',
         message: err?.message || 'Failed to update budget settings in API layer.',
       })
-    })
-
-    setCommittedBudgets(committed)
-    setBudgetForm(committed)
-    setFormErrors({})
-
-    setNotification({
-      type: 'success',
-      message: 'Budget and send limit configuration updated (in-memory demo state).',
-    })
+    } finally {
+      isSubmittingRef.current = false
+      setIsSubmitting(false)
+    }
   }
 
   function handleResetForm() {
@@ -383,7 +407,7 @@ export default function SourcesPage({ initialSources } = {}) {
         </p>
       </div>
 
-      {!USE_MOCKS && (
+      {!isMockMode() && (
         <div
           role="region"
           aria-label="Offline Contract Notice"
@@ -730,7 +754,7 @@ export default function SourcesPage({ initialSources } = {}) {
               variant="secondary"
               type="button"
               onClick={handleResetForm}
-              disabled={changedBudgetFields.length === 0}
+              disabled={changedBudgetFields.length === 0 || isSubmitting}
             >
               Reset Form
             </Button>
@@ -738,7 +762,7 @@ export default function SourcesPage({ initialSources } = {}) {
             <Button
               variant="primary"
               type="submit"
-              disabled={hasErrors || changedBudgetFields.length === 0}
+              disabled={hasErrors || changedBudgetFields.length === 0 || isSubmitting}
             >
               Review &amp; Save Budget Changes
             </Button>
@@ -749,7 +773,9 @@ export default function SourcesPage({ initialSources } = {}) {
       {activeModal && activeModal.type === 'source_toggle' && (
         <Modal
           isOpen={true}
-          onClose={() => setActiveModal(null)}
+          onClose={() => {
+            if (!isSubmittingRef.current) setActiveModal(null)
+          }}
           title="Confirm Scraper Source State Change"
         >
           <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
@@ -819,14 +845,19 @@ export default function SourcesPage({ initialSources } = {}) {
             </div>
 
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px', marginTop: '8px' }}>
-              <Button variant="secondary" onClick={() => setActiveModal(null)}>
+              <Button
+                variant="secondary"
+                onClick={() => setActiveModal(null)}
+                disabled={isSubmitting}
+              >
                 Cancel
               </Button>
               <Button
                 variant={activeModal.newValue === 'Disabled' ? 'danger' : 'primary'}
                 onClick={handleConfirmSourceToggle}
+                disabled={isSubmitting}
               >
-                Confirm {activeModal.newValue}
+                {isSubmitting ? 'Updating...' : `Confirm ${activeModal.newValue}`}
               </Button>
             </div>
           </div>
@@ -836,7 +867,9 @@ export default function SourcesPage({ initialSources } = {}) {
       {activeModal && activeModal.type === 'budget_update' && (
         <Modal
           isOpen={true}
-          onClose={() => setActiveModal(null)}
+          onClose={() => {
+            if (!isSubmittingRef.current) setActiveModal(null)
+          }}
           title="Confirm Budget Configuration Changes"
         >
           <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
@@ -880,11 +913,19 @@ export default function SourcesPage({ initialSources } = {}) {
             </div>
 
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px', marginTop: '8px' }}>
-              <Button variant="secondary" onClick={() => setActiveModal(null)}>
+              <Button
+                variant="secondary"
+                onClick={() => setActiveModal(null)}
+                disabled={isSubmitting}
+              >
                 Cancel
               </Button>
-              <Button variant="primary" onClick={handleConfirmBudgetSave}>
-                Confirm &amp; Apply Changes
+              <Button
+                variant="primary"
+                onClick={handleConfirmBudgetSave}
+                disabled={isSubmitting}
+              >
+                {isSubmitting ? 'Applying...' : 'Confirm & Apply Changes'}
               </Button>
             </div>
           </div>
