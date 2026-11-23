@@ -18,7 +18,7 @@ from backend.app.core.db import get_pool
 from backend.app.services.eligibility import is_eligible_for_campaign
 
 # Adjust this import to the actual module path in your project.
-from backend.app.services.scoring_services import calculate_data_quality_score
+from backend.app.services.scoring_service import calculate_data_quality_score
 
 from ai.gemini_client import GeminiClient
 from ai.validators.fact_check import fact_check_draft
