@@ -289,6 +289,7 @@ class DraftService:
                 validation_issues = [
                     "AI output must be a dictionary."
                 ]
+                ai_output = {}
                 continue
 
             subject = ai_output.get("subject", "")
