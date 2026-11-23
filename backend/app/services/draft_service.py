@@ -31,7 +31,6 @@ logger = logging.getLogger(__name__)
 # --------------------------------------------------
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-
 PROMPT_DIR = REPO_ROOT / "ai" / "prompts"
 
 PROMPT_PATH = PROMPT_DIR / "email_draft_v1.md"
@@ -43,11 +42,9 @@ TONE_PROMPT_PATHS = {
 }
 
 PROMPT_VERSION = "email_draft_v1"
+MODEL_NAME = "gemini"
 
 ALLOWED_TONES = set(TONE_PROMPT_PATHS)
-
-# Keep this aligned with the model configured in your Gemini client.
-MODEL_NAME = "gemini"
 
 
 # --------------------------------------------------
@@ -89,16 +86,15 @@ class DraftService:
                 "Invalid tone. Allowed values: hr, tpo, startup_founder."
             )
 
-        # Fetch opportunity.
         opportunity = self._get_opportunity(opportunity_id)
 
         if not opportunity:
             raise DraftNotFoundError("Opportunity not found.")
 
-        # Fetch campaign and recipient contact method.
         campaign, contact = self._get_campaign_and_contact(
-            campaign_id,
-            recipient_contact_method_id,
+            campaign_id=campaign_id,
+            opportunity_id=opportunity_id,
+            recipient_contact_method_id=recipient_contact_method_id,
         )
 
         if not campaign:
@@ -106,10 +102,10 @@ class DraftService:
 
         if not contact:
             raise DraftNotFoundError(
-                "Recipient contact method not found."
+                "Recipient contact method not found or not linked "
+                "to this opportunity."
             )
 
-        # Calculate the real data-quality score.
         score_result = self._calculate_opportunity_score(
             opportunity,
             contact,
@@ -125,7 +121,7 @@ class DraftService:
                 "or has been suppressed."
             )
 
-        # This function returns text, not a boolean.
+        # Eligibility returns text, not a boolean.
         eligibility = is_eligible_for_campaign(opportunity)
 
         if eligibility != "Eligible":
@@ -133,7 +129,6 @@ class DraftService:
                 "This lead is not eligible for campaign outreach."
             )
 
-        # Build only the verified facts needed by Gemini.
         verified_facts = self._build_verified_facts(
             opportunity=opportunity,
             campaign=campaign,
@@ -144,7 +139,6 @@ class DraftService:
             verified_facts=verified_facts,
         )
 
-        # Generate and validate. Retry once if validation fails.
         ai_output, validation_issues = self._generate_and_validate(
             prompt=prompt,
             verified_facts=verified_facts,
@@ -157,7 +151,6 @@ class DraftService:
         else:
             draft_status = "generated"
 
-        # Persist the draft. This method does not send emails.
         return self._save_draft(
             campaign_id=campaign_id,
             opportunity_id=opportunity_id,
@@ -171,32 +164,35 @@ class DraftService:
     # Database reads
     # --------------------------------------------------
 
-    
-def _get_opportunity(self, opportunity_id: str):
-    with self.db.connection() as conn:
-        with conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(
-                """
-                SELECT
-                    o.*,
-                    s.name AS source_name,
-                    s.status AS source_status,
-                    s.is_enabled AS source_is_enabled,
-                    s.permitted_use_note
-                FROM opportunities o
-                JOIN sources s
-                    ON s.id = o.source_id
-                WHERE o.id = %s
-                """,
-                (opportunity_id,),
-            )
+    def _get_opportunity(
+        self,
+        opportunity_id: str,
+    ) -> Dict[str, Any]:
 
-            return cur.fetchone()
+        with self.db.connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        o.*,
+                        s.name AS source_name,
+                        s.status AS source_status,
+                        s.is_enabled AS source_is_enabled,
+                        s.permitted_use_note
+                    FROM opportunities o
+                    JOIN sources s
+                        ON s.id = o.source_id
+                    WHERE o.id = %s
+                    """,
+                    (opportunity_id,),
+                )
 
+                return cur.fetchone()
 
     def _get_campaign_and_contact(
         self,
         campaign_id: str,
+        opportunity_id: str,
         recipient_contact_method_id: str,
     ) -> Tuple[Any, Any]:
 
@@ -228,9 +224,15 @@ def _get_opportunity(self, opportunity_id: str):
                     FROM contact_methods cm
                     JOIN contacts c
                         ON c.id = cm.contact_id
+                    JOIN opportunity_contacts oc
+                        ON oc.contact_id = c.id
                     WHERE cm.id = %s
+                      AND oc.opportunity_id = %s
                     """,
-                    (recipient_contact_method_id,),
+                    (
+                        recipient_contact_method_id,
+                        opportunity_id,
+                    ),
                 )
 
                 contact = cur.fetchone()
@@ -241,55 +243,54 @@ def _get_opportunity(self, opportunity_id: str):
     # Eligibility scoring
     # --------------------------------------------------
 
-def _calculate_opportunity_score(
-    self,
-    opportunity: Dict[str, Any],
-    contact: Dict[str, Any],
-) -> Dict[str, Any]:
+    def _calculate_opportunity_score(
+        self,
+        opportunity: Dict[str, Any],
+        contact: Dict[str, Any],
+    ) -> Dict[str, Any]:
 
-    published_at = opportunity.get("published_at")
+        published_at = opportunity.get("published_at")
 
-    if published_at:
-        if published_at.tzinfo is None:
-            published_at = published_at.replace(
-                tzinfo=timezone.utc
+        if published_at:
+            if published_at.tzinfo is None:
+                published_at = published_at.replace(
+                    tzinfo=timezone.utc
+                )
+
+            published_days_ago = max(
+                0,
+                (
+                    datetime.now(timezone.utc) - published_at
+                ).days,
             )
+        else:
+            published_days_ago = 9999
 
-        published_days_ago = max(
-            0,
-            (
-                datetime.now(timezone.utc) - published_at
-            ).days,
+        # source_id contains the source classification used by scoring.
+        source_type = opportunity.get("source_id", "unknown")
+
+        # Do not treat disabled or quarantined sources as trusted.
+        if (
+            not opportunity.get("source_is_enabled", False)
+            or opportunity.get("source_status") != "healthy"
+        ):
+            source_type = "unknown"
+
+        return calculate_data_quality_score(
+            source_type=source_type,
+            has_contact_role=bool(contact.get("role_title")),
+            verification_status=contact.get(
+                "verified_status",
+                "unknown",
+            ),
+            published_days_ago=published_days_ago,
+            has_description=bool(opportunity.get("description")),
+            has_salary=bool(opportunity.get("salary_text")),
+            has_location=bool(opportunity.get("location")),
+            is_suppressed=bool(
+                opportunity.get("is_suppressed", False)
+            ),
         )
-    else:
-        published_days_ago = 9999
-
-    # Source classification must match the scoring service's rules.
-    source_type = opportunity.get("source_name", "unknown")
-
-    # A disabled or quarantined source should not be treated as trusted.
-    if (
-        not opportunity.get("source_is_enabled", False)
-        or opportunity.get("source_status") != "healthy"
-    ):
-        source_type = "unknown"
-
-    return calculate_data_quality_score(
-        source_type=source_type,
-        has_contact_role=bool(contact.get("role_title")),
-        verification_status=contact.get(
-            "verified_status",
-            "unknown",
-        ),
-        published_days_ago=published_days_ago,
-        has_description=bool(opportunity.get("description")),
-        has_salary=bool(opportunity.get("salary_text")),
-        has_location=bool(opportunity.get("location")),
-        is_suppressed=bool(
-            opportunity.get("is_suppressed", False)
-        ),
-    )
-
 
     # --------------------------------------------------
     # Verified facts
@@ -309,7 +310,6 @@ def _calculate_opportunity_score(
             "salary_text": opportunity.get("salary_text") or "",
         }
 
-        # Exclude unavailable facts.
         return {
             fact_id: value
             for fact_id, value in facts.items()
@@ -338,13 +338,8 @@ def _calculate_opportunity_score(
                 f"Tone prompt file not found: {tone_path}"
             )
 
-        base_prompt = PROMPT_PATH.read_text(
-            encoding="utf-8"
-        )
-
-        tone_prompt = tone_path.read_text(
-            encoding="utf-8"
-        )
+        base_prompt = PROMPT_PATH.read_text(encoding="utf-8")
+        tone_prompt = tone_path.read_text(encoding="utf-8")
 
         facts_json = json.dumps(
             verified_facts,
@@ -388,7 +383,6 @@ def _calculate_opportunity_score(
                     "Gemini returned invalid output on attempt %s.",
                     attempt + 1,
                 )
-
                 continue
 
             subject = ai_output.get("subject", "")
@@ -422,7 +416,7 @@ def _calculate_opportunity_score(
                 issues,
             )
 
-        # Never insert NULL into the ai_output JSONB column.
+        # ai_output must never be None because the DB column is NOT NULL.
         if not isinstance(ai_output, dict):
             ai_output = {
                 "subject": "",
