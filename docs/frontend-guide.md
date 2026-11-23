@@ -424,3 +424,7 @@ Colors, score bands, and radii are defined in `src/styles/tokens.css`:
   - Because `contracts/openapi.yaml` currently does not define configuration endpoints, an in-file mock API layer (`fetchSources`, `updateSourceToggle`, `fetchBudgetSettings`, `updateBudgetSettings`) is provided inside `Sources.jsx`.
   - Respects `VITE_USE_MOCKS === 'true'` following the repository convention. Never makes calls to fictitious or uncontracted backend endpoints.
   - Explicit notices inform users that changes modify in-memory session state only and reset upon page reload.
+### FE-33: Frontend Component Tests (Vitest)
+- **Files**: `src/pages/Login/__tests__/Login.test.jsx`, `src/pages/EnrichmentQueue/__tests__/EnrichmentQueue.test.jsx`, `src/pages/EnrichmentQueue/__tests__/History.test.jsx`, `src/pages/CampaignManager/__tests__/Controls.test.jsx`, `src/pages/LeadPipeline/__tests__/LeadTable.test.jsx`.
+- Added Vitest + React Testing Library component test suites using mocked data/services (`vi.mock`) covering loading, populated render, empty, error, and primary interaction states.
+- Verified locally with `npm test`, `npm run lint` (`--max-warnings 0`), and `npm run build`.
