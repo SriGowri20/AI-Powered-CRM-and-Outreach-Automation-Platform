@@ -5,6 +5,7 @@ from backend.app.services import draft_service
 from backend.app.services.draft_service import (
     DraftService,
     IneligibleLeadError,
+    DraftNotFoundError,
 )
 
 
@@ -15,8 +16,10 @@ def opportunity():
         "job_title": "Python Developer",
         "location": "Bengaluru",
         "source": "official_careers",
+        "salary_text": "12 LPA",
 
-        # Inputs used by calculate_data_quality_score()
+        # Scoring service inputs.
+        # These must eventually match your real DB mapping.
         "source_type": "official_careers",
         "has_contact_role": True,
         "verification_status": "deliverable",
@@ -25,8 +28,6 @@ def opportunity():
         "has_salary": True,
         "has_location": True,
         "is_suppressed": False,
-
-        "salary_text": "12 LPA",
     }
 
 
@@ -46,29 +47,7 @@ def contact():
 
 
 @pytest.fixture
-def gemini_output():
-    return {
-        "subject": "Python Developer Opportunity",
-        "body": (
-            "We came across your Python Developer opportunity "
-            "and wanted to share a relevant candidate."
-        ),
-        "claims_used": [
-            {"fact_id": "fact_role"},
-        ],
-    }
-
-
-@pytest.fixture
-def service(
-    monkeypatch,
-    tmp_path,
-    opportunity,
-    campaign,
-    contact,
-):
-    # Use temporary prompt files so tests do not depend on
-    # the repository's prompt file contents.
+def prompt_files(tmp_path, monkeypatch):
     base_prompt = tmp_path / "email_draft_v1.md"
     tone_prompt = tmp_path / "tone_hr.md"
 
@@ -76,6 +55,7 @@ def service(
         "Generate an email using only verified facts.",
         encoding="utf-8",
     )
+
     tone_prompt.write_text(
         "Use a professional HR tone.",
         encoding="utf-8",
@@ -93,30 +73,31 @@ def service(
         {"hr": tone_prompt},
     )
 
-    # Keep the actual scoring function active.
-    # Only mock the separate eligibility text function.
+
+@pytest.fixture
+def service(
+    monkeypatch,
+    opportunity,
+    campaign,
+    contact,
+    prompt_files,
+):
+    # The real scoring function remains active.
+    # Only the separate eligibility text function is mocked.
     monkeypatch.setattr(
         draft_service,
         "is_eligible_for_campaign",
         lambda opportunity: "Eligible",
     )
 
-    mock_gemini = type("MockGemini", (), {})()
-    mock_gemini.generate = lambda prompt: (
-        {
-            "subject": "Test",
-            "body": "Test body",
-            "claims_used": [{"fact_id": "fact_role"}],
-        },
-        {},
-    )
+    mock_gemini = MockGemini()
 
     instance = DraftService(
         db=object(),
         gemini_client=mock_gemini,
     )
 
-    # Avoid database access in these service unit tests.
+    # Mock database reads so these tests do not need PostgreSQL.
     monkeypatch.setattr(
         instance,
         "_get_opportunity",
@@ -129,11 +110,12 @@ def service(
         lambda campaign_id, contact_id: (campaign, contact),
     )
 
-    # Capture the saved values instead of inserting into the DB.
-    saved = {}
+    # Capture the data that would be saved to the database.
+    saved_draft = {}
 
     def fake_save_draft(**kwargs):
-        saved.update(kwargs)
+        saved_draft.update(kwargs)
+
         return {
             "draft_id": "draft-123",
             "campaign_id": kwargs["campaign_id"],
@@ -147,27 +129,40 @@ def service(
         fake_save_draft,
     )
 
-    instance._test_saved = saved
+    instance.saved_draft = saved_draft
+
     return instance
 
 
-def test_generate_draft_calls_mock_gemini_client(
-    service,
-    gemini_output,
-):
-    class MockGemini:
-        def __init__(self):
-            self.called = False
-            self.received_prompt = None
+class MockGemini:
+    def __init__(self, responses=None):
+        self.responses = responses or []
+        self.call_count = 0
+        self.prompts = []
 
-        def generate(self, prompt):
-            self.called = True
-            self.received_prompt = prompt
-            return gemini_output, {"total_tokens": 100}
+    def generate(self, prompt):
+        self.prompts.append(prompt)
+        self.call_count += 1
 
-    mock_gemini = MockGemini()
-    service.gemini_client = mock_gemini
+        if self.responses:
+            return self.responses.pop(0)
 
+        return (
+            {
+                "subject": "Python Developer Opportunity",
+                "body": (
+                    "We found a Python Developer opportunity "
+                    "that may interest you."
+                ),
+                "claims_used": [
+                    {"fact_id": "fact_role"},
+                ],
+            },
+            {"total_tokens": 100},
+        )
+
+
+def test_generate_draft_calls_mock_gemini_client(service):
     result = service.generate_draft(
         campaign_id="campaign-123",
         opportunity_id="opp-123",
@@ -175,10 +170,18 @@ def test_generate_draft_calls_mock_gemini_client(
         tone="hr",
     )
 
-    assert mock_gemini.called is True
-    assert "Verified facts" in mock_gemini.received_prompt
+    assert service.gemini_client.call_count == 1
+
+    assert "Verified facts" in service.gemini_client.prompts[0]
+
     assert result["status"] == "generated"
-    assert result["ai_output"] == gemini_output
+    assert result["draft_id"] == "draft-123"
+
+    assert result["ai_output"]["subject"]
+    assert result["ai_output"]["body"]
+
+    assert service.saved_draft["draft_status"] == "generated"
+    assert service.saved_draft["ai_output"] is not None
 
 
 def test_generate_draft_rejects_score_below_80(
@@ -190,6 +193,8 @@ def test_generate_draft_rejects_score_below_80(
         "job_title": "Developer",
         "location": "Bengaluru",
         "source": "aggregator",
+        "salary_text": "",
+
         "source_type": "aggregator",
         "has_contact_role": False,
         "verification_status": "unknown",
@@ -198,7 +203,6 @@ def test_generate_draft_rejects_score_below_80(
         "has_salary": False,
         "has_location": False,
         "is_suppressed": False,
-        "salary_text": "",
     }
 
     monkeypatch.setattr(
@@ -215,6 +219,9 @@ def test_generate_draft_rejects_score_below_80(
             tone="hr",
         )
 
+    # Gemini must not run for an ineligible lead.
+    assert service.gemini_client.call_count == 0
+
 
 def test_generate_draft_rejects_suppressed_lead(
     service,
@@ -225,6 +232,8 @@ def test_generate_draft_rejects_suppressed_lead(
         "job_title": "Python Developer",
         "location": "Bengaluru",
         "source": "official_careers",
+        "salary_text": "12 LPA",
+
         "source_type": "official_careers",
         "has_contact_role": True,
         "verification_status": "deliverable",
@@ -233,7 +242,6 @@ def test_generate_draft_rejects_suppressed_lead(
         "has_salary": True,
         "has_location": True,
         "is_suppressed": True,
-        "salary_text": "12 LPA",
     }
 
     monkeypatch.setattr(
@@ -250,28 +258,22 @@ def test_generate_draft_rejects_suppressed_lead(
             tone="hr",
         )
 
+    assert service.gemini_client.call_count == 0
+
 
 def test_validation_retry_then_needs_review(service):
-    class MockGemini:
-        def __init__(self):
-            self.call_count = 0
+    invalid_output = {
+        "subject": "Test subject",
+        "body": "",
+        "claims_used": [],
+    }
 
-        def generate(self, prompt):
-            self.call_count += 1
-
-            # Both outputs fail validation because body and claims
-            # are empty. Each call returns (output, usage).
-            return (
-                {
-                    "subject": "Test subject",
-                    "body": "",
-                    "claims_used": [],
-                },
-                {"total_tokens": 50},
-            )
-
-    mock_gemini = MockGemini()
-    service.gemini_client = mock_gemini
+    service.gemini_client = MockGemini(
+        responses=[
+            (invalid_output, {"total_tokens": 50}),
+            (invalid_output, {"total_tokens": 60}),
+        ]
+    )
 
     result = service.generate_draft(
         campaign_id="campaign-123",
@@ -280,18 +282,41 @@ def test_validation_retry_then_needs_review(service):
         tone="hr",
     )
 
-    assert mock_gemini.call_count == 2
+    assert service.gemini_client.call_count == 2
+
     assert result["status"] == "needs_review"
+
     assert result["ai_output"] is not None
     assert result["ai_output"]["review_required"] is True
     assert result["ai_output"]["validation_issues"]
 
+    assert service.saved_draft["draft_status"] == "needs_review"
+    assert service.saved_draft["ai_output"] is not None
+
 
 def test_invalid_tone_is_rejected(service):
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="Invalid tone"):
         service.generate_draft(
             campaign_id="campaign-123",
             opportunity_id="opp-123",
             recipient_contact_method_id="contact-123",
             tone="casual",
+        )
+
+    assert service.gemini_client.call_count == 0
+
+
+def test_missing_opportunity_raises_not_found(service, monkeypatch):
+    monkeypatch.setattr(
+        service,
+        "_get_opportunity",
+        lambda opportunity_id: None,
+    )
+
+    with pytest.raises(DraftNotFoundError, match="Opportunity not found"):
+        service.generate_draft(
+            campaign_id="campaign-123",
+            opportunity_id="missing",
+            recipient_contact_method_id="contact-123",
+            tone="hr",
         )
