@@ -1,10 +1,10 @@
-
 from fastapi.testclient import TestClient
 
 from backend.app.main import app
 from backend.app.core import security
 from backend.app.api.v1 import campaigns as campaigns_api
 from backend.app.services.draft_service import IneligibleLeadError
+
 
 client = TestClient(app)
 
@@ -19,6 +19,14 @@ def test_non_eligible_lead_returns_409(monkeypatch):
                 "This lead is not eligible for campaign outreach."
             )
 
+    # Prevent the test from accessing PostgreSQL.
+    monkeypatch.setattr(
+        campaigns_api,
+        "get_pool",
+        lambda: object(),
+    )
+
+    # Authenticate as admin.
     app.dependency_overrides[security.get_current_user] = lambda: {
         "id": "admin-1",
         "email": "admin@example.com",
