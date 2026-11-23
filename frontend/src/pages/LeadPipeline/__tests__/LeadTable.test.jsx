@@ -67,6 +67,7 @@ describe('LeadTable', () => {
 
     render(<LeadTable onSelect={vi.fn()} />)
 
+    expect(screen.getByRole('status', { name: 'Loading' })).toBeTruthy()
     expect(screen.queryByRole('table')).toBeNull()
     expect(screen.queryByText('No leads match your criteria')).toBeNull()
 
@@ -79,6 +80,7 @@ describe('LeadTable', () => {
     })
 
     expect(await screen.findByText('No leads match your criteria')).toBeTruthy()
+    expect(screen.queryByRole('status', { name: 'Loading' })).toBeNull()
   })
 
   it('renders lead rows, formatted fields, and pagination summary on success', async () => {

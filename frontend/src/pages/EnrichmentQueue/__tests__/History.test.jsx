@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react'
 import { describe, it, expect, afterEach } from 'vitest'
-import { render, screen, cleanup } from '@testing-library/react'
+import { render, screen, within, cleanup } from '@testing-library/react'
 import History from '../History'
 
 afterEach(() => {
@@ -24,17 +24,38 @@ describe('History', () => {
     expect(screen.getByText('Email Provenance')).toBeTruthy()
   })
 
-  it('renders the enrichment history row with formatted timestamp and status', () => {
+  it('renders the requester and formatted timestamp in the data row', () => {
     render(<History />)
 
+    const [, ...dataRows] = screen.getAllByRole('row')
     const expectedTimestamp = new Date('2026-10-30T10:30:00').toLocaleString()
 
-    expect(screen.getByText('requester 1')).toBeTruthy()
-    expect(screen.getByText(expectedTimestamp)).toBeTruthy()
-    expect(screen.getByText('Apollo')).toBeTruthy()
-    expect(screen.getByText('Success')).toBeTruthy()
-    expect(screen.getByText('2')).toBeTruthy()
-    expect(screen.getByText('LinkedIn')).toBeTruthy()
+    expect(dataRows).toHaveLength(1)
+    expect(within(dataRows[0]).getByText('requester 1')).toBeTruthy()
+    expect(within(dataRows[0]).getByText(expectedTimestamp)).toBeTruthy()
+  })
+
+  it('renders exactly one data row with Apollo, Success, and LinkedIn', () => {
+    render(<History />)
+
+    const [, ...dataRows] = screen.getAllByRole('row')
+    expect(dataRows).toHaveLength(1)
+
+    const row = within(dataRows[0])
+    expect(row.getByText('Apollo')).toBeTruthy()
+    expect(row.getByText('Success')).toBeTruthy()
+    expect(row.getByText('LinkedIn')).toBeTruthy()
+  })
+
+  it('renders the credits value inside the enrichment row', () => {
+    render(<History />)
+
+    const [, ...dataRows] = screen.getAllByRole('row')
+    expect(dataRows).toHaveLength(1)
+
+    const cells = within(dataRows[0]).getAllByRole('cell')
+    expect(cells[4].textContent).toBe('2')
+    expect(within(dataRows[0]).getByText('2')).toBeTruthy()
   })
 
   it('shows single-page pagination summary with navigation buttons disabled', () => {

@@ -408,4 +408,4 @@ Colors, score bands, and radii are defined in `src/styles/tokens.css`:
 ### FE-33: Frontend Component Tests (Vitest)
 - **Files**: `src/pages/Login/__tests__/Login.test.jsx`, `src/pages/EnrichmentQueue/__tests__/EnrichmentQueue.test.jsx`, `src/pages/EnrichmentQueue/__tests__/History.test.jsx`, `src/pages/CampaignManager/__tests__/Controls.test.jsx`, `src/pages/LeadPipeline/__tests__/LeadTable.test.jsx`.
 - Added Vitest + React Testing Library component test suites using mocked data/services (`vi.mock`) covering loading, populated render, empty, error, and primary interaction states.
-- Verified locally with `npm test` (15 files / 94 tests passing), `npm run lint` (`--max-warnings 0`), and `npm run build`.
+- Verified locally with `npm test`, `npm run lint` (`--max-warnings 0`), and `npm run build`.
