@@ -229,11 +229,16 @@ def test_generate_draft_rejects_score_below_80(
     assert score_result["score"] < 80
     assert score_result["is_eligible"] is False
 
-    monkeypatch.setattr(
-        service,
-        "_get_opportunity",
-        lambda opportunity_id: low_score_opportunity,
-    )
+  
+monkeypatch.setattr(
+    service,
+    "_get_campaign_and_contact",
+    lambda campaign_id, opportunity_id, recipient_contact_method_id: (
+        campaign,
+        contact,
+    ),
+)
+
 
     with pytest.raises(IneligibleLeadError):
         service.generate_draft(
