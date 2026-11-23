@@ -8,16 +8,15 @@ It never sends or dispatches emails.
 
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Tuple
 
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from backend.app.core.db import get_pool
 from backend.app.services.eligibility import is_eligible_for_campaign
-
-# Adjust this import to the actual module path in your project.
 from backend.app.services.scoring_service import calculate_data_quality_score
 
 from ai.gemini_client import GeminiClient
@@ -26,14 +25,16 @@ from ai.validators.fact_check import fact_check_draft
 
 logger = logging.getLogger(__name__)
 
-# draft_service.py is assumed to be:
-# repo/backend/app/services/draft_service.py
+
+# --------------------------------------------------
+# Prompt configuration
+# --------------------------------------------------
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 PROMPT_DIR = REPO_ROOT / "ai" / "prompts"
-BASE_PROMPT_PATH = PROMPT_DIR / "email_draft_v1.md"
 
-PROMPT_PATH = BASE_PROMPT_PATH
+PROMPT_PATH = PROMPT_DIR / "email_draft_v1.md"
 
 TONE_PROMPT_PATHS = {
     "hr": PROMPT_DIR / "tone_hr.md",
@@ -42,24 +43,38 @@ TONE_PROMPT_PATHS = {
 }
 
 PROMPT_VERSION = "email_draft_v1"
+
 ALLOWED_TONES = set(TONE_PROMPT_PATHS)
 
+# Keep this aligned with the model configured in your Gemini client.
+MODEL_NAME = "gemini"
+
+
+# --------------------------------------------------
+# Exceptions
+# --------------------------------------------------
 
 class IneligibleLeadError(Exception):
-    """Raised when a lead cannot be contacted for a campaign."""
+    """Raised when a lead is not eligible for campaign outreach."""
 
 
 class DraftNotFoundError(Exception):
     """Raised when a required campaign, opportunity, or contact is missing."""
 
 
-class DraftService:
-    def __init__(self, db=None, gemini_client=None):
-        if db is None:
-            db = get_pool()
+# --------------------------------------------------
+# Draft service
+# --------------------------------------------------
 
-        self.db = db
+class DraftService:
+
+    def __init__(self, db=None, gemini_client=None):
+        self.db = db if db is not None else get_pool()
         self.gemini_client = gemini_client or GeminiClient()
+
+    # --------------------------------------------------
+    # Main draft generation method
+    # --------------------------------------------------
 
     def generate_draft(
         self,
@@ -74,12 +89,13 @@ class DraftService:
                 "Invalid tone. Allowed values: hr, tpo, startup_founder."
             )
 
-        # Read database records before calling Gemini.
+        # Fetch opportunity.
         opportunity = self._get_opportunity(opportunity_id)
 
         if not opportunity:
             raise DraftNotFoundError("Opportunity not found.")
 
+        # Fetch campaign and recipient contact method.
         campaign, contact = self._get_campaign_and_contact(
             campaign_id,
             recipient_contact_method_id,
@@ -89,11 +105,15 @@ class DraftService:
             raise DraftNotFoundError("Campaign not found.")
 
         if not contact:
-            raise DraftNotFoundError("Recipient contact method not found.")
+            raise DraftNotFoundError(
+                "Recipient contact method not found."
+            )
 
-        # Build scoring inputs from the actual database records.
-        # Replace the mapping in this method with your real schema fields.
-        score_result = self._calculate_opportunity_score(opportunity)
+        # Calculate the real data-quality score.
+        score_result = self._calculate_opportunity_score(
+            opportunity,
+            contact,
+        )
 
         if (
             score_result["band"] == "suppressed"
@@ -105,7 +125,7 @@ class DraftService:
                 "or has been suppressed."
             )
 
-        # This function returns text, so compare the exact expected value.
+        # This function returns text, not a boolean.
         eligibility = is_eligible_for_campaign(opportunity)
 
         if eligibility != "Eligible":
@@ -113,7 +133,7 @@ class DraftService:
                 "This lead is not eligible for campaign outreach."
             )
 
-        # Only send verified, flat facts to Gemini.
+        # Build only the verified facts needed by Gemini.
         verified_facts = self._build_verified_facts(
             opportunity=opportunity,
             campaign=campaign,
@@ -124,6 +144,7 @@ class DraftService:
             verified_facts=verified_facts,
         )
 
+        # Generate and validate. Retry once if validation fails.
         ai_output, validation_issues = self._generate_and_validate(
             prompt=prompt,
             verified_facts=verified_facts,
@@ -136,34 +157,52 @@ class DraftService:
         else:
             draft_status = "generated"
 
+        # Persist the draft. This method does not send emails.
         return self._save_draft(
             campaign_id=campaign_id,
             opportunity_id=opportunity_id,
             recipient_contact_method_id=recipient_contact_method_id,
             ai_output=ai_output,
+            input_refs=verified_facts,
             draft_status=draft_status,
         )
 
-    def _get_opportunity(self, opportunity_id: str):
-        with self.db.connection() as conn:
-            with conn.cursor(row_factory=dict_row) as cur:
-                cur.execute(
-                    """
-                    SELECT *
-                    FROM opportunities
-                    WHERE id = %s
-                    """,
-                    (opportunity_id,),
-                )
-                return cur.fetchone()
+    # --------------------------------------------------
+    # Database reads
+    # --------------------------------------------------
+
+    
+def _get_opportunity(self, opportunity_id: str):
+    with self.db.connection() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                SELECT
+                    o.*,
+                    s.name AS source_name,
+                    s.status AS source_status,
+                    s.is_enabled AS source_is_enabled,
+                    s.permitted_use_note
+                FROM opportunities o
+                JOIN sources s
+                    ON s.id = o.source_id
+                WHERE o.id = %s
+                """,
+                (opportunity_id,),
+            )
+
+            return cur.fetchone()
+
 
     def _get_campaign_and_contact(
         self,
         campaign_id: str,
         recipient_contact_method_id: str,
-    ):
+    ) -> Tuple[Any, Any]:
+
         with self.db.connection() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
+
                 cur.execute(
                     """
                     SELECT *
@@ -172,73 +211,114 @@ class DraftService:
                     """,
                     (campaign_id,),
                 )
+
                 campaign = cur.fetchone()
 
                 cur.execute(
                     """
-                    SELECT *
-                    FROM contact_methods
-                    WHERE id = %s
+                    SELECT
+                        cm.id,
+                        cm.contact_id,
+                        cm.kind,
+                        cm.value,
+                        cm.provenance,
+                        cm.verified_status,
+                        c.name AS contact_name,
+                        c.role_title
+                    FROM contact_methods cm
+                    JOIN contacts c
+                        ON c.id = cm.contact_id
+                    WHERE cm.id = %s
                     """,
                     (recipient_contact_method_id,),
                 )
+
                 contact = cur.fetchone()
 
         return campaign, contact
 
-    def _calculate_opportunity_score(
-        self,
-        opportunity: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """
-        Map actual opportunity/database fields to the scoring function.
+    # --------------------------------------------------
+    # Eligibility scoring
+    # --------------------------------------------------
 
-        IMPORTANT:
-        The values below are placeholders until matched to your migrations
-        and related tables. Do not assume these are actual DB column names.
-        """
+def _calculate_opportunity_score(
+    self,
+    opportunity: Dict[str, Any],
+    contact: Dict[str, Any],
+) -> Dict[str, Any]:
 
-        return calculate_data_quality_score(
-            source_type=opportunity["source_type"],
-            has_contact_role=opportunity["has_contact_role"],
-            verification_status=opportunity["verification_status"],
-            published_days_ago=opportunity["published_days_ago"],
-            has_description=opportunity["has_description"],
-            has_salary=opportunity["has_salary"],
-            has_location=opportunity["has_location"],
-            is_suppressed=opportunity["is_suppressed"],
+    published_at = opportunity.get("published_at")
+
+    if published_at:
+        if published_at.tzinfo is None:
+            published_at = published_at.replace(
+                tzinfo=timezone.utc
+            )
+
+        published_days_ago = max(
+            0,
+            (
+                datetime.now(timezone.utc) - published_at
+            ).days,
         )
+    else:
+        published_days_ago = 9999
+
+    # Source classification must match the scoring service's rules.
+    source_type = opportunity.get("source_name", "unknown")
+
+    # A disabled or quarantined source should not be treated as trusted.
+    if (
+        not opportunity.get("source_is_enabled", False)
+        or opportunity.get("source_status") != "healthy"
+    ):
+        source_type = "unknown"
+
+    return calculate_data_quality_score(
+        source_type=source_type,
+        has_contact_role=bool(contact.get("role_title")),
+        verification_status=contact.get(
+            "verified_status",
+            "unknown",
+        ),
+        published_days_ago=published_days_ago,
+        has_description=bool(opportunity.get("description")),
+        has_salary=bool(opportunity.get("salary_text")),
+        has_location=bool(opportunity.get("location")),
+        is_suppressed=bool(
+            opportunity.get("is_suppressed", False)
+        ),
+    )
+
+
+    # --------------------------------------------------
+    # Verified facts
+    # --------------------------------------------------
 
     def _build_verified_facts(
         self,
         opportunity: Dict[str, Any],
         campaign: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """
-        Return only verified facts.
-
-        Replace these example source fields with fields confirmed in
-        your database. Do not pass SELECT * rows or contact details.
-        """
 
         facts = {
-            "fact_role": opportunity.get("job_title"),
+            "fact_role": opportunity.get("title"),
             "fact_location": opportunity.get("location"),
-            "fact_source": opportunity.get("source"),
+            "fact_source": opportunity.get("source_id"),
             "fact_campaign": campaign.get("name"),
+            "salary_text": opportunity.get("salary_text") or "",
         }
 
-        # The supplied validator specifically looks for this key
-        # when checking compensation claims.
-        facts["salary_text"] = opportunity.get("salary_text") or ""
-
-        # Remove unavailable values so the model cannot treat them
-        # as confirmed facts.
+        # Exclude unavailable facts.
         return {
             fact_id: value
             for fact_id, value in facts.items()
             if value is not None and value != ""
         }
+
+    # --------------------------------------------------
+    # Prompt building
+    # --------------------------------------------------
 
     def _build_prompt(
         self,
@@ -258,30 +338,43 @@ class DraftService:
                 f"Tone prompt file not found: {tone_path}"
             )
 
-        base_prompt = PROMPT_PATH.read_text(encoding="utf-8")
-        tone_prompt = tone_path.read_text(encoding="utf-8")
+        base_prompt = PROMPT_PATH.read_text(
+            encoding="utf-8"
+        )
+
+        tone_prompt = tone_path.read_text(
+            encoding="utf-8"
+        )
+
+        facts_json = json.dumps(
+            verified_facts,
+            default=str,
+            ensure_ascii=False,
+        )
 
         return (
             f"{base_prompt}\n\n"
             f"{tone_prompt}\n\n"
             "Verified facts (use only these facts):\n"
-            f"{json.dumps(verified_facts, default=str, ensure_ascii=False)}"
+            f"{facts_json}"
         )
+
+    # --------------------------------------------------
+    # Gemini generation and validation
+    # --------------------------------------------------
 
     def _generate_and_validate(
         self,
         prompt: str,
         verified_facts: Dict[str, Any],
-    ):
-        """
-        Generate a draft and validate it.
-        Retry once if validation fails.
-        """
+    ) -> Tuple[Dict[str, Any], list]:
 
         validation_issues = []
         ai_output = {}
 
+        # Initial attempt + one retry.
         for attempt in range(2):
+
             # GeminiClient.generate returns (output, usage).
             ai_output, _usage = self.gemini_client.generate(prompt)
 
@@ -290,15 +383,28 @@ class DraftService:
                     "AI output must be a dictionary."
                 ]
                 ai_output = {}
+
+                logger.warning(
+                    "Gemini returned invalid output on attempt %s.",
+                    attempt + 1,
+                )
+
                 continue
 
             subject = ai_output.get("subject", "")
 
-            if not isinstance(subject, str) or len(subject) > 80:
+            if not isinstance(subject, str):
+                is_valid = False
+                issues = [
+                    "Email subject must be a string."
+                ]
+
+            elif len(subject) > 80:
                 is_valid = False
                 issues = [
                     "Email subject must be 80 characters or fewer."
                 ]
+
             else:
                 is_valid, issues = fact_check_draft(
                     draft=ai_output,
@@ -316,7 +422,7 @@ class DraftService:
                 issues,
             )
 
-        # Keep a non-NULL dictionary for the database JSONB column.
+        # Never insert NULL into the ai_output JSONB column.
         if not isinstance(ai_output, dict):
             ai_output = {
                 "subject": "",
@@ -326,40 +432,48 @@ class DraftService:
 
         return ai_output, validation_issues
 
+    # --------------------------------------------------
+    # Save generated draft
+    # --------------------------------------------------
+
     def _save_draft(
         self,
         campaign_id: str,
         opportunity_id: str,
         recipient_contact_method_id: str,
         ai_output: Dict[str, Any],
+        input_refs: Dict[str, Any],
         draft_status: str,
     ) -> Dict[str, Any]:
 
         with self.db.connection() as conn:
             with conn.transaction():
                 with conn.cursor(row_factory=dict_row) as cur:
+
                     cur.execute(
                         """
                         INSERT INTO campaign_drafts (
                             campaign_id,
                             opportunity_id,
                             recipient_contact_method_id,
-                            ai_output,
-                            status,
                             model,
-                            prompt_version
+                            prompt_version,
+                            input_refs,
+                            ai_output,
+                            status
                         )
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                         RETURNING id
                         """,
                         (
                             campaign_id,
                             opportunity_id,
                             recipient_contact_method_id,
+                            MODEL_NAME,
+                            PROMPT_VERSION,
+                            Jsonb(input_refs),
                             Jsonb(ai_output),
                             draft_status,
-                            "gemini",
-                            PROMPT_VERSION,
                         ),
                     )
 
