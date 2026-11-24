@@ -1,4 +1,4 @@
-
+```python
 """
 Service for generating campaign email drafts.
 
@@ -60,6 +60,39 @@ class DraftNotFoundError(Exception):
 
 
 # --------------------------------------------------
+# Source mapping
+# --------------------------------------------------
+
+# calculate_data_quality_score() accepts only these source types:
+#
+#   official_careers
+#   verified_portal
+#   aggregator
+#
+# The opportunity stores source_id, while _get_opportunity()
+# also loads sources.name as source_name.
+#
+# We therefore map the source record to the scoring source type
+# instead of passing the raw numeric/UUID source_id to the scorer.
+
+SOURCE_NAME_TO_SCORING_TYPE = {
+    "official_careers": "official_careers",
+    "official careers": "official_careers",
+    "company careers": "official_careers",
+    "company career": "official_careers",
+    "employer careers": "official_careers",
+
+    "verified_portal": "verified_portal",
+    "verified portal": "verified_portal",
+    "internshala": "verified_portal",
+    "unstop": "verified_portal",
+
+    "aggregator": "aggregator",
+    "job aggregator": "aggregator",
+}
+
+
+# --------------------------------------------------
 # Draft service
 # --------------------------------------------------
 
@@ -106,10 +139,31 @@ class DraftService:
                 "to this opportunity."
             )
 
+        # --------------------------------------------------
+        # 1. Check actual suppression status
+        # --------------------------------------------------
+        #
+        # Do NOT read is_suppressed from the opportunity DB row.
+        # The suppression status is derived from the recipient's
+        # email/domain against suppression_entries.
+        #
+        suppressed = self._is_contact_suppressed(contact)
+
+        # --------------------------------------------------
+        # 2. Calculate opportunity score
+        # --------------------------------------------------
+        #
+        # Pass the real suppression result into the scoring engine.
+        #
         score_result = self._calculate_opportunity_score(
-            opportunity,
-            contact,
+            opportunity=opportunity,
+            contact=contact,
+            suppressed=suppressed,
         )
+
+        # --------------------------------------------------
+        # 3. Score-level eligibility check
+        # --------------------------------------------------
 
         if (
             score_result["band"] == "suppressed"
@@ -121,28 +175,64 @@ class DraftService:
                 "or has been suppressed."
             )
 
-        # Eligibility returns text, not a boolean.
-        eligibility = is_eligible_for_campaign(opportunity)
+        # --------------------------------------------------
+        # 4. Campaign eligibility gate
+        # --------------------------------------------------
+        #
+        # IMPORTANT:
+        # Do not pass the raw DB opportunity here.
+        #
+        # is_eligible_for_campaign() expects:
+        #
+        # {
+        #     "score": ...,
+        #     "is_suppressed": ...
+        # }
+        #
+        eligibility_input = {
+            "score": score_result["score"],
+            "is_suppressed": suppressed,
+        }
+
+        eligibility = is_eligible_for_campaign(
+            eligibility_input
+        )
 
         if eligibility != "Eligible":
             raise IneligibleLeadError(
                 "This lead is not eligible for campaign outreach."
             )
 
+        # --------------------------------------------------
+        # 5. Build verified facts
+        # --------------------------------------------------
+
         verified_facts = self._build_verified_facts(
             opportunity=opportunity,
             campaign=campaign,
         )
+
+        # --------------------------------------------------
+        # 6. Build AI prompt
+        # --------------------------------------------------
 
         prompt = self._build_prompt(
             tone=tone,
             verified_facts=verified_facts,
         )
 
+        # --------------------------------------------------
+        # 7. Generate + validate AI draft
+        # --------------------------------------------------
+
         ai_output, validation_issues = self._generate_and_validate(
             prompt=prompt,
             verified_facts=verified_facts,
         )
+
+        # --------------------------------------------------
+        # 8. Determine draft status
+        # --------------------------------------------------
 
         if validation_issues:
             draft_status = "needs_review"
@@ -150,6 +240,10 @@ class DraftService:
             ai_output["review_required"] = True
         else:
             draft_status = "generated"
+
+        # --------------------------------------------------
+        # 9. Persist draft
+        # --------------------------------------------------
 
         return self._save_draft(
             campaign_id=campaign_id,
@@ -240,6 +334,74 @@ class DraftService:
         return campaign, contact
 
     # --------------------------------------------------
+    # Suppression lookup
+    # --------------------------------------------------
+
+    def _is_contact_suppressed(
+        self,
+        contact: Dict[str, Any],
+    ) -> bool:
+        """
+        Checks the recipient email and its domain against
+        suppression_entries.
+
+        Suppression is determined from the actual recipient contact,
+        not from the opportunity DB row.
+        """
+
+        email = (contact.get("value") or "").strip().lower()
+
+        if not email:
+            return False
+
+        domain = None
+
+        if "@" in email:
+            domain = email.split("@", 1)[1]
+
+        with self.db.connection() as conn:
+            with conn.cursor() as cur:
+
+                # Check exact email suppression.
+                cur.execute(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM suppression_entries
+                        WHERE kind = 'email'
+                          AND LOWER(TRIM(value)) = %s
+                    )
+                    """,
+                    (email,),
+                )
+
+                email_suppressed = bool(cur.fetchone()[0])
+
+                if email_suppressed:
+                    return True
+
+                # Check domain suppression.
+                if domain:
+                    cur.execute(
+                        """
+                        SELECT EXISTS (
+                            SELECT 1
+                            FROM suppression_entries
+                            WHERE kind = 'domain'
+                              AND LOWER(TRIM(value)) = %s
+                        )
+                        """,
+                        (domain,),
+                    )
+
+                    domain_suppressed = bool(cur.fetchone()[0])
+
+                    if domain_suppressed:
+                        return True
+
+        return False
+
+    # --------------------------------------------------
     # Eligibility scoring
     # --------------------------------------------------
 
@@ -247,6 +409,7 @@ class DraftService:
         self,
         opportunity: Dict[str, Any],
         contact: Dict[str, Any],
+        suppressed: bool,
     ) -> Dict[str, Any]:
 
         published_at = opportunity.get("published_at")
@@ -266,30 +429,52 @@ class DraftService:
         else:
             published_days_ago = 9999
 
-        # source_id contains the source classification used by scoring.
-        source_type = opportunity.get("source_id", "unknown")
+        # --------------------------------------------------
+        # Map DB source to scoring source type
+        # --------------------------------------------------
+        #
+        # calculate_data_quality_score() expects:
+        #
+        # official_careers
+        # verified_portal
+        # aggregator
+        #
+        source_name = str(
+            opportunity.get("source_name") or ""
+        ).strip().lower()
+
+        source_type = SOURCE_NAME_TO_SCORING_TYPE.get(
+            source_name,
+            "aggregator",
+        )
 
         # Do not treat disabled or quarantined sources as trusted.
         if (
             not opportunity.get("source_is_enabled", False)
             or opportunity.get("source_status") != "healthy"
         ):
-            source_type = "unknown"
+            source_type = "aggregator"
 
         return calculate_data_quality_score(
             source_type=source_type,
-            has_contact_role=bool(contact.get("role_title")),
+            has_contact_role=bool(
+                contact.get("role_title")
+            ),
             verification_status=contact.get(
                 "verified_status",
                 "unknown",
             ),
             published_days_ago=published_days_ago,
-            has_description=bool(opportunity.get("description")),
-            has_salary=bool(opportunity.get("salary_text")),
-            has_location=bool(opportunity.get("location")),
-            is_suppressed=bool(
-                opportunity.get("is_suppressed", False)
+            has_description=bool(
+                opportunity.get("description")
             ),
+            has_salary=bool(
+                opportunity.get("salary_text")
+            ),
+            has_location=bool(
+                opportunity.get("location")
+            ),
+            is_suppressed=suppressed,
         )
 
     # --------------------------------------------------
@@ -338,8 +523,13 @@ class DraftService:
                 f"Tone prompt file not found: {tone_path}"
             )
 
-        base_prompt = PROMPT_PATH.read_text(encoding="utf-8")
-        tone_prompt = tone_path.read_text(encoding="utf-8")
+        base_prompt = PROMPT_PATH.read_text(
+            encoding="utf-8"
+        )
+
+        tone_prompt = tone_path.read_text(
+            encoding="utf-8"
+        )
 
         facts_json = json.dumps(
             verified_facts,
@@ -371,21 +561,28 @@ class DraftService:
         for attempt in range(2):
 
             # GeminiClient.generate returns (output, usage).
-            ai_output, _usage = self.gemini_client.generate(prompt)
+            ai_output, _usage = self.gemini_client.generate(
+                prompt
+            )
 
             if not isinstance(ai_output, dict):
                 validation_issues = [
                     "AI output must be a dictionary."
                 ]
+
                 ai_output = {}
 
                 logger.warning(
                     "Gemini returned invalid output on attempt %s.",
                     attempt + 1,
                 )
+
                 continue
 
-            subject = ai_output.get("subject", "")
+            subject = ai_output.get(
+                "subject",
+                "",
+            )
 
             if not isinstance(subject, str):
                 is_valid = False
@@ -477,5 +674,8 @@ class DraftService:
             "draft_id": str(saved["id"]),
             "campaign_id": campaign_id,
             "status": draft_status,
+            "model": MODEL_NAME,
+            "prompt_version": PROMPT_VERSION,
             "ai_output": ai_output,
         }
+```
