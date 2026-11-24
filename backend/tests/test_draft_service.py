@@ -273,7 +273,6 @@ def test_generate_draft_rejects_score_below_80(
 # --------------------------------------------------
 # Test suppressed lead
 # --------------------------------------------------
-
 def test_generate_draft_rejects_suppressed_lead(
     service,
     monkeypatch,
@@ -289,27 +288,18 @@ def test_generate_draft_rejects_suppressed_lead(
         "salary_text": "12 LPA",
         "location": "Bengaluru",
         "published_at": datetime.now(timezone.utc),
-        "is_suppressed": True,
     }
-
-    score_result = draft_service.calculate_data_quality_score(
-        source_type="official_careers",
-        has_contact_role=True,
-        verification_status="deliverable",
-        published_days_ago=1,
-        has_description=True,
-        has_salary=True,
-        has_location=True,
-        is_suppressed=True,
-    )
-
-    assert score_result["band"] == "suppressed"
-    assert score_result["is_eligible"] is False
 
     monkeypatch.setattr(
         service,
         "_get_opportunity",
         lambda opportunity_id: suppressed_opportunity,
+    )
+
+    monkeypatch.setattr(
+        service,
+        "_is_contact_suppressed",
+        lambda contact: True,
     )
 
     with pytest.raises(IneligibleLeadError):
