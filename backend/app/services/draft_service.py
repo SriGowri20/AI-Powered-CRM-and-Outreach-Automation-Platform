@@ -408,7 +408,7 @@ class DraftService:
         self,
         opportunity: Dict[str, Any],
         contact: Dict[str, Any],
-        suppressed: bool,
+        is_suppressed: bool,
     ) -> Dict[str, Any]:
 
         published_at = opportunity.get("published_at")
