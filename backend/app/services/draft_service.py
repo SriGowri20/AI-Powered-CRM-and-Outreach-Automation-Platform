@@ -157,7 +157,7 @@ class DraftService:
         score_result = self._calculate_opportunity_score(
             opportunity=opportunity,
             contact=contact,
-            suppressed=suppressed,
+            is_suppressed=suppressed,
         )
 
         # --------------------------------------------------
