@@ -1,4 +1,3 @@
-
 """
 Service for generating campaign email drafts.
 
