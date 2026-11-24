@@ -473,7 +473,7 @@ class DraftService:
             has_location=bool(
                 opportunity.get("location")
             ),
-            is_suppressed=suppressed,
+            is_suppressed=is_suppressed,
         )
 
     # --------------------------------------------------
