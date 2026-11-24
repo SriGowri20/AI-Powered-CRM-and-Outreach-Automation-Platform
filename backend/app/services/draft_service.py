@@ -155,9 +155,9 @@ class DraftService:
         # Pass the real suppression result into the scoring engine.
         #
         score_result = self._calculate_opportunity_score(
-            opportunity=opportunity,
-            contact=contact,
-            is_suppressed=is_suppressed,
+            opportunity = opportunity,
+            contact = contact,
+            is_suppressed = suppressed,
         )
 
         # --------------------------------------------------
