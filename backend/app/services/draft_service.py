@@ -1,4 +1,4 @@
-```python
+
 """
 Service for generating campaign email drafts.
 
@@ -678,4 +678,3 @@ class DraftService:
             "prompt_version": PROMPT_VERSION,
             "ai_output": ai_output,
         }
-```
