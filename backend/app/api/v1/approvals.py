@@ -26,6 +26,11 @@ class SendRequest(BaseModel):
     idempotency_key: str
 
 
+class DraftEditRequest(BaseModel):
+    edited_subject: Optional[str] = None
+    edited_body: Optional[str] = None
+
+
 def build_content_hash(recipient: str, subject: str, body: str) -> str:
     """Build a deterministic hash for the exact approved message content."""
     content = json.dumps(
@@ -177,6 +182,82 @@ def approve_draft(
         "approved_by": current_user["id"],
         "approved_at": approved_at.isoformat(),
     }
+
+
+def edit_approved_draft(
+    draft_id: str,
+    payload: DraftEditRequest,
+    current_user: dict = Depends(
+        require_roles(["admin", "campaign_manager"])
+    ),
+):
+    """Edit draft content and revoke an approval already made for it."""
+    draft = _fetch_draft(draft_id)
+    if draft is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Draft not found",
+        )
+
+    ai_output = draft[1]
+    if isinstance(ai_output, str):
+        ai_output = json.loads(ai_output)
+    ai_output = ai_output or {}
+
+    subject = (
+        payload.edited_subject
+        if payload.edited_subject is not None
+        else (
+            draft[2]
+            if draft[2] is not None
+            else ai_output.get("subject", "")
+        )
+    )
+    body = (
+        payload.edited_body
+        if payload.edited_body is not None
+        else (
+            draft[3]
+            if draft[3] is not None
+            else ai_output.get("body", "")
+        )
+    )
+
+    with transaction() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE campaign_drafts
+                   SET edited_subject = %s,
+                       edited_body = %s,
+                       status = 'needs_review',
+                       updated_at = NOW() AT TIME ZONE 'UTC'
+                 WHERE id = %s
+                """,
+                (subject, body, draft_id),
+            )
+            cur.execute(
+                """
+                UPDATE approvals
+                   SET revoked_at = NOW() AT TIME ZONE 'UTC'
+                 WHERE draft_id = %s
+                   AND revoked_at IS NULL
+                """,
+                (draft_id,),
+            )
+
+    return {"status": "invalidated", "draft_id": draft_id}
+
+
+@router.patch("/drafts/{draft_id}")
+def edit_draft(
+    draft_id: str,
+    payload: DraftEditRequest,
+    current_user: dict = Depends(
+        require_roles(["admin", "campaign_manager"])
+    ),
+):
+    return edit_approved_draft(draft_id, payload, current_user)
 
 
 @router.post("/dispatch/send")
